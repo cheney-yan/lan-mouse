@@ -46,7 +46,8 @@
       <label>高（逻辑像素）<input type="number" id="rh" step="1"></label>
       <label>左上角 X<input type="number" id="rx" step="1"></label>
       <label>左上角 Y<input type="number" id="ry" step="1"></label>
-      <div class="hint" style="margin-top:6px">检测到的实际分辨率：<span id="detected">—</span> <button id="useDetected" style="padding:2px 8px;font-size:12px;display:none">采用</button></div>
+      <div class="hint" style="margin-top:6px">检测到：<span id="detected">—</span></div>
+      <div class="hint" style="margin-top:4px"><button id="useDetected" style="padding:2px 8px;font-size:12px;display:none">按物理尺寸换算</button> <span id="physHint"></span></div>
       <div class="hint" style="margin-top:6px">可穿越的边：<span id="edges">—</span></div>
     </div>
     <div class="card">
@@ -77,12 +78,27 @@ function fetchState() {
     document.getElementById('remoteName').textContent = S.remote.hostname;
     S.detected = r.detected_size || null;
     const det = document.getElementById('detected'), useBtn = document.getElementById('useDetected');
-    det.textContent = S.detected ? `${S.detected.w} × ${S.detected.h}（逻辑像素）` : '未能检测（ssh ' + S.remote.hostname + ' 失败）';
-    useBtn.style.display = S.detected ? 'inline-block' : 'none';
-    if (S.detected && !reg) { S.remote.w = S.detected.w; S.remote.h = S.detected.h; }
+    det.textContent = S.detected ? `逻辑 ${S.detected.w} × ${S.detected.h}` + (S.detected.mm_w ? `，面板 ${S.detected.mm_w} × ${S.detected.mm_h} mm` : '') : '未能检测（ssh ' + S.remote.hostname + ' 失败）';
+    const ph = physicalSize();
+    useBtn.style.display = ph ? 'inline-block' : 'none';
+    document.getElementById('physHint').textContent = ph ? `≈ ${ph.w} × ${ph.h} 点（按旁边显示器 ${ph.ref} 的每毫米点数换算）` : (S.detected ? '远端没有报告面板物理尺寸，方块大小请手填' : '');
+    if (ph && !reg) { S.remote.w = ph.w; S.remote.h = ph.h; }
     showDaemon(st.daemon);
     layout(); render();
   });
+}
+// remote size in Mac points so that physically equal screens look equal: mm × (points per mm of the nearest Mac display)
+function physicalSize() {
+  if (!S.detected || !S.detected.mm_w) return null;
+  const withMm = S.displays.filter(d => d.pts_per_mm);
+  if (!withMm.length) return null;
+  const r = S.remote || {};
+  let ref = withMm[0];
+  if (r.x !== undefined) { // nearest display centre
+    let best = Infinity;
+    for (const d of withMm) { const dx = (d.x + d.w/2) - (r.x + (r.w||0)/2), dy = (d.y + d.h/2) - (r.y + (r.h||0)/2); const dd = dx*dx+dy*dy; if (dd < best) { best = dd; ref = d; } }
+  }
+  return { w: Math.round(S.detected.mm_w * ref.pts_per_mm), h: Math.round(S.detected.mm_h * ref.pts_per_mm), ref: ref.name || ('显示器 ' + ref.id) };
 }
 function defaultRemote(ds) {
   const main = ds.find(d => d.main) || ds[0] || {x:0,y:0,w:1920,h:1080};
@@ -151,7 +167,7 @@ function edges() {
 }
 ['rx','ry','rw','rh'].forEach(k => document.getElementById(k).addEventListener('change', e => { S.remote[k[1]] = Number(e.target.value); layout(); render(); }));
 document.getElementById('reload').onclick = fetchState;
-document.getElementById('useDetected').onclick = () => { if (S.detected) { S.remote.w = S.detected.w; S.remote.h = S.detected.h; layout(); render(); } };
+document.getElementById('useDetected').onclick = () => { const ph = physicalSize(); if (ph) { S.remote.w = ph.w; S.remote.h = ph.h; layout(); render(); } };
 document.getElementById('apply').onclick = () => {
   const btn = document.getElementById('apply'); btn.disabled = true;
   const out = document.getElementById('result'); out.textContent = '应用中…';

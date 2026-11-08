@@ -49,12 +49,16 @@ def displays():
     names = display_names()
     res = []
     for line in out.splitlines():
-        m = re.match(r"id=(\d+) main=(\w+) builtin=\w+ origin=\((-?\d+),(-?\d+)\) size=(\d+)x(\d+)", line)
+        m = re.match(r"id=(\d+) main=(\w+) builtin=\w+ origin=\((-?\d+),(-?\d+)\) size=(\d+)x(\d+)(?: mm=(\d+)x(\d+))?", line)
         if not m:
             continue
         w, h = int(m.group(5)), int(m.group(6))
+        mm_w = int(m.group(7)) if m.group(7) else 0
+        mm_h = int(m.group(8)) if m.group(8) else 0
         res.append({"id": int(m.group(1)), "main": m.group(2) == "true", "x": int(m.group(3)),
-                    "y": int(m.group(4)), "w": w, "h": h, "name": names.get((w, h), "")})
+                    "y": int(m.group(4)), "w": w, "h": h, "name": names.get((w, h), ""),
+                    "mm_w": mm_w, "mm_h": mm_h,
+                    "pts_per_mm": round(w / mm_w, 4) if mm_w else None})
     return res
 
 
@@ -155,6 +159,9 @@ def remote_size(hostname):
         m = re.match(r"\s*(\d+)\s+(\d+)", p.stdout)
         if m:
             size = {"w": int(m.group(1)), "h": int(m.group(2))}
+            mm = re.search(r"^mm\s+(\d+)\s+(\d+)", p.stdout, re.M)
+            if mm:
+                size["mm_w"], size["mm_h"] = int(mm.group(1)), int(mm.group(2))
     except Exception:
         size = None
     _size_cache[hostname] = (now, size)
