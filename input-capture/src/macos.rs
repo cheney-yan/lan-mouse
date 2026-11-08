@@ -10,7 +10,7 @@ use core_foundation::{
 };
 use core_graphics::{
     base::{CGError, kCGErrorSuccess},
-    display::{CGDisplay, CGPoint},
+    display::{CGDisplay, CGPoint, CGRect},
     event::{
         CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
         CGEventTapPlacement, CGEventTapProxy, CGEventType, CallbackResult, EventField,
@@ -25,7 +25,7 @@ use keycode::{KeyMap, KeyMapping};
 use libc::c_void;
 use once_cell::unsync::Lazy;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::{CString, c_char},
     pin::Pin,
     sync::{Arc, OnceLock},
@@ -46,10 +46,62 @@ struct Bounds {
     ymax: f64,
 }
 
+/// A rectangle (in global macOS display coordinates) that is NOT covered by
+/// any display but is physically occupied by a remote client. Configured via
+/// the environment variables `LAN_MOUSE_REGION_{LEFT,RIGHT,TOP,BOTTOM}`
+/// as `x,y,width,height`. When a region is set for a position, the barrier
+/// for that position fires when the cursor would move out of a display and
+/// into the region (from the matching direction), instead of firing on the
+/// outer edge of the bounding box of all displays.
+#[derive(Debug, Clone, Copy)]
+struct Region {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl Region {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    fn from_env(position: Position) -> Option<Self> {
+        let var = match position {
+            Position::Left => "LAN_MOUSE_REGION_LEFT",
+            Position::Right => "LAN_MOUSE_REGION_RIGHT",
+            Position::Top => "LAN_MOUSE_REGION_TOP",
+            Position::Bottom => "LAN_MOUSE_REGION_BOTTOM",
+        };
+        let value = std::env::var(var).ok()?;
+        let nums: Vec<f64> = value
+            .split(',')
+            .map(|v| v.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .ok()?;
+        if nums.len() != 4 || nums[2] <= 0.0 || nums[3] <= 0.0 {
+            log::warn!("ignoring invalid {var}={value:?} (expected x,y,width,height)");
+            return None;
+        }
+        let region = Region {
+            x: nums[0],
+            y: nums[1],
+            w: nums[2],
+            h: nums[3],
+        };
+        log::info!("using capture region for {position:?}: {region:?}");
+        Some(region)
+    }
+}
+
 #[derive(Debug)]
 struct InputCaptureState {
     /// active capture positions
     active_clients: Lazy<HashSet<Position>>,
+    /// optional dead-zone regions per position (see [`Region`])
+    regions: HashMap<Position, Region>,
+    /// bounds of every active display
+    displays: Vec<CGRect>,
     /// the currently entered capture position, if any
     current_pos: Option<Position>,
     /// position where the cursor was captured
@@ -72,8 +124,19 @@ enum ProducerEvent {
 
 impl InputCaptureState {
     fn new() -> Result<Self, MacosCaptureCreationError> {
+        let regions = [
+            Position::Left,
+            Position::Right,
+            Position::Top,
+            Position::Bottom,
+        ]
+        .into_iter()
+        .filter_map(|p| Region::from_env(p).map(|r| (p, r)))
+        .collect();
         let mut res = Self {
             active_clients: Lazy::new(HashSet::new),
+            regions,
+            displays: Vec::new(),
             current_pos: None,
             enter_position: None,
             bounds: Bounds::default(),
@@ -88,7 +151,28 @@ impl InputCaptureState {
         let relative_x = event.get_double_value_field(EventField::MOUSE_EVENT_DELTA_X);
         let relative_y = event.get_double_value_field(EventField::MOUSE_EVENT_DELTA_Y);
 
+        let target_x = location.x + relative_x;
+        let target_y = location.y + relative_y;
+
         for &position in self.active_clients.iter() {
+            if let Some(region) = self.regions.get(&position) {
+                // region mode: fire when leaving a display into the region,
+                // moving in the direction that matches the position
+                let direction_ok = match position {
+                    Position::Left => relative_x < 0.0 && location.x >= region.x + region.w,
+                    Position::Right => relative_x > 0.0 && location.x < region.x,
+                    Position::Top => relative_y < 0.0 && location.y >= region.y + region.h,
+                    Position::Bottom => relative_y > 0.0 && location.y < region.y,
+                };
+                if direction_ok
+                    && region.contains(target_x, target_y)
+                    && !self.on_any_display(target_x, target_y)
+                {
+                    log::debug!("Crossed into region of position: {position:?}");
+                    return Some(position);
+                }
+                continue;
+            }
             if (position == Position::Left && (location.x + relative_x) <= self.bounds.xmin)
                 || (position == Position::Right && (location.x + relative_x) >= self.bounds.xmax)
                 || (position == Position::Top && (location.y + relative_y) <= self.bounds.ymin)
@@ -105,8 +189,14 @@ impl InputCaptureState {
     fn update_bounds(&mut self) -> Result<(), MacosCaptureCreationError> {
         let active_ids =
             CGDisplay::active_displays().map_err(MacosCaptureCreationError::ActiveDisplays)?;
-        active_ids.iter().for_each(|d| {
-            let bounds = CGDisplay::new(*d).bounds();
+        self.displays = active_ids.iter().map(|d| CGDisplay::new(*d).bounds()).collect();
+        self.bounds = Bounds {
+            xmin: f64::MAX,
+            xmax: f64::MIN,
+            ymin: f64::MAX,
+            ymax: f64::MIN,
+        };
+        self.displays.iter().for_each(|bounds| {
             self.bounds.xmin = self.bounds.xmin.min(bounds.origin.x);
             self.bounds.xmax = self.bounds.xmax.max(bounds.origin.x + bounds.size.width);
             self.bounds.ymin = self.bounds.ymin.min(bounds.origin.y);
@@ -117,17 +207,30 @@ impl InputCaptureState {
         Ok(())
     }
 
+    /// whether the given point lies on any active display
+    fn on_any_display(&self, x: f64, y: f64) -> bool {
+        self.displays.iter().any(|d| {
+            x >= d.origin.x
+                && x < d.origin.x + d.size.width
+                && y >= d.origin.y
+                && y < d.origin.y + d.size.height
+        })
+    }
+
     /// start the input capture by
     fn start_capture(&mut self, event: &CGEvent, position: Position) -> Result<(), CaptureError> {
         let mut location = event.location();
         let edge_offset = 1.0;
-        // move cursor location to display bounds
-        match position {
-            Position::Left => location.x = self.bounds.xmin + edge_offset,
-            Position::Right => location.x = self.bounds.xmax - edge_offset,
-            Position::Top => location.y = self.bounds.ymin + edge_offset,
-            Position::Bottom => location.y = self.bounds.ymax - edge_offset,
-        };
+        // move cursor location to display bounds (region mode: the cursor is
+        // already at the edge of the display it crossed, keep it there)
+        if !self.regions.contains_key(&position) {
+            match position {
+                Position::Left => location.x = self.bounds.xmin + edge_offset,
+                Position::Right => location.x = self.bounds.xmax - edge_offset,
+                Position::Top => location.y = self.bounds.ymin + edge_offset,
+                Position::Bottom => location.y = self.bounds.ymax - edge_offset,
+            };
+        }
         self.enter_position = Some(location);
         self.reset_cursor()
     }
