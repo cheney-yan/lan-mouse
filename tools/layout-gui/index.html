@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Lan Mouse 桌面编排</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; --bg:#f4f4f6; --fg:#1d1d1f; --card:#fff; --line:#d0d0d5; --mac:#4a7bd0; --remote:#d08a2e; --muted:#6e6e73; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161618; --fg:#eaeaea; --card:#222226; --line:#3a3a40; --muted:#9a9aa0; } }
+  body { margin:0; font: 14px/1.5 -apple-system, "PingFang SC", Helvetica, sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  main { display:grid; grid-template-columns: 1fr 320px; gap:16px; padding:16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  #stage { position:relative; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; height:70vh; min-height:420px; touch-action:none; }
+  .rect { position:absolute; box-sizing:border-box; border:2px solid; border-radius:6px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:grab; user-select:none; font-size:13px; text-align:center; padding:6px; }
+  .rect.mac { border-color:var(--mac); background:color-mix(in srgb, var(--mac) 18%, transparent); }
+  .rect.main { cursor:default; border-style:solid; }
+  .rect.remote { border-color:var(--remote); background:color-mix(in srgb, var(--remote) 20%, transparent); border-style:dashed; }
+  .rect .t { font-weight:600; } .rect .s { color:var(--muted); font-size:12px; }
+  .rect.dragging { cursor:grabbing; box-shadow:0 6px 20px rgba(0,0,0,.25); z-index:5; }
+  aside .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  aside h2 { font-size:14px; margin:0 0 8px; }
+  label { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:4px 0; color:var(--muted); }
+  input[type=number] { width:90px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--fg); }
+  button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--mac); color:#fff; border-color:var(--mac); }
+  button:disabled { opacity:.5; cursor:default; }
+  pre { white-space:pre-wrap; font-size:12px; max-height:220px; overflow:auto; margin:8px 0 0; color:var(--muted); }
+  .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); margin-right:4px; }
+  .ok { color:#2a9d4a; } .bad { color:#d0453a; }
+  .hint { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lan Mouse 桌面编排</h1>
+  <span class="hint">拖动方块到实际摆放位置，边会自动吸附。蓝色是 Mac 的显示器（主屏固定），橙色是远端电脑。</span>
+</header>
+<main>
+  <div id="stage"></div>
+  <aside>
+    <div class="card">
+      <h2>远端电脑 <span id="remoteName" class="badge"></span></h2>
+      <label>宽（逻辑像素）<input type="number" id="rw" step="1"></label>
+      <label>高（逻辑像素）<input type="number" id="rh" step="1"></label>
+      <label>左上角 X<input type="number" id="rx" step="1"></label>
+      <label>左上角 Y<input type="number" id="ry" step="1"></label>
+      <div class="hint" style="margin-top:6px">检测到的实际分辨率：<span id="detected">—</span> <button id="useDetected" style="padding:2px 8px;font-size:12px;display:none">采用</button></div>
+      <div class="hint" style="margin-top:6px">可穿越的边：<span id="edges">—</span></div>
+    </div>
+    <div class="card">
+      <button class="primary" id="apply">应用并重启 Lan Mouse</button>
+      <button id="reload">重新读取</button>
+      <div class="hint" style="margin-top:8px">应用会：改 Mac 显示器排列（若你拖动了蓝色方块）、写入穿越区域、重写客户端条目、重启 daemon。每次都会自动备份。</div>
+      <pre id="result"></pre>
+    </div>
+    <div class="card">
+      <h2>Daemon 状态 <span id="dstate" class="badge"></span></h2>
+      <pre id="clients"></pre>
+      <pre id="log"></pre>
+    </div>
+  </aside>
+</main>
+<script>
+const stage = document.getElementById('stage');
+let S = { displays: [], remote: null, scale: 1, ox: 0, oy: 0 };
+const SNAP = 40; // real px
+
+function fetchState() {
+  return fetch('/api/state').then(r => r.json()).then(st => {
+    S.displays = st.displays.map(d => ({...d}));
+    const r = st.remote || {};
+    const reg = r.region;
+    const dflt = defaultRemote(S.displays);
+    S.remote = { hostname: r.hostname || 'remote', x: reg ? reg.x : dflt.x, y: reg ? reg.y : dflt.y, w: reg ? reg.w : dflt.w, h: reg ? reg.h : dflt.h };
+    document.getElementById('remoteName').textContent = S.remote.hostname;
+    S.detected = r.detected_size || null;
+    const det = document.getElementById('detected'), useBtn = document.getElementById('useDetected');
+    det.textContent = S.detected ? `${S.detected.w} × ${S.detected.h}（逻辑像素）` : '未能检测（ssh ' + S.remote.hostname + ' 失败）';
+    useBtn.style.display = S.detected ? 'inline-block' : 'none';
+    if (S.detected && !reg) { S.remote.w = S.detected.w; S.remote.h = S.detected.h; }
+    showDaemon(st.daemon);
+    layout(); render();
+  });
+}
+function defaultRemote(ds) {
+  const main = ds.find(d => d.main) || ds[0] || {x:0,y:0,w:1920,h:1080};
+  return { x: main.x + main.w, y: main.y, w: 2560, h: 1440 };
+}
+function showDaemon(d) {
+  const b = document.getElementById('dstate');
+  b.textContent = d.running ? '运行中' : '未运行'; b.className = 'badge ' + (d.running ? 'ok' : 'bad');
+  document.getElementById('clients').textContent = d.clients || '';
+  document.getElementById('log').textContent = (d.log || '').split('\n').slice(-8).join('\n');
+}
+function allRects() { return S.displays.concat([S.remote]); }
+function layout() {
+  const rs = allRects();
+  const minx = Math.min(...rs.map(r => r.x)), miny = Math.min(...rs.map(r => r.y));
+  const maxx = Math.max(...rs.map(r => r.x + r.w)), maxy = Math.max(...rs.map(r => r.y + r.h));
+  const pad = 60, W = stage.clientWidth, H = stage.clientHeight;
+  S.scale = Math.min((W - 2*pad) / (maxx - minx), (H - 2*pad) / (maxy - miny));
+  S.ox = pad - minx * S.scale + ((W - 2*pad) - (maxx - minx) * S.scale) / 2;
+  S.oy = pad - miny * S.scale + ((H - 2*pad) - (maxy - miny) * S.scale) / 2;
+}
+function render() {
+  stage.innerHTML = '';
+  S.displays.forEach(d => stage.appendChild(makeRect(d, 'mac' + (d.main ? ' main' : ''), (d.name || ('显示器 ' + d.id)) + (d.main ? '（主屏）' : ''), d.id)));
+  stage.appendChild(makeRect(S.remote, 'remote', S.remote.hostname, 'remote'));
+  ['rx','ry','rw','rh'].forEach(k => document.getElementById(k).value = Math.round(S.remote[k[1]]));
+  document.getElementById('edges').textContent = edges().map(e => ({right:'从左边的屏幕向右进入', left:'从右边的屏幕向左进入', bottom:'从上面的屏幕向下进入', top:'从下面的屏幕向上进入'})[e]).join('；') || '没有贴边（无法穿越）';
+}
+function makeRect(r, cls, title, key) {
+  const el = document.createElement('div');
+  el.className = 'rect ' + cls;
+  el.style.left = (S.ox + r.x * S.scale) + 'px'; el.style.top = (S.oy + r.y * S.scale) + 'px';
+  el.style.width = (r.w * S.scale) + 'px'; el.style.height = (r.h * S.scale) + 'px';
+  el.innerHTML = `<div class="t">${title}</div><div class="s">${Math.round(r.w)} × ${Math.round(r.h)}</div><div class="s">(${Math.round(r.x)}, ${Math.round(r.y)})</div>`;
+  if (!(cls.includes('main'))) el.addEventListener('pointerdown', e => startDrag(e, r, el));
+  return el;
+}
+function startDrag(e, r, el) {
+  e.preventDefault(); el.setPointerCapture(e.pointerId); el.classList.add('dragging');
+  const sx = e.clientX, sy = e.clientY, ox = r.x, oy = r.y;
+  const move = ev => { r.x = ox + (ev.clientX - sx) / S.scale; r.y = oy + (ev.clientY - sy) / S.scale; snap(r); render(); };
+  const up = () => { el.removeEventListener('pointermove', move); el.classList.remove('dragging'); r.x = Math.round(r.x); r.y = Math.round(r.y); layout(); render(); };
+  el.addEventListener('pointermove', move); el.addEventListener('pointerup', up, {once:true}); el.addEventListener('pointercancel', up, {once:true});
+}
+function snap(r) {
+  const others = allRects().filter(o => o !== r);
+  let bx = null, by = null, dx = SNAP, dy = SNAP;
+  for (const o of others) {
+    const xs = [[o.x + o.w, 'l'], [o.x, 'r'], [o.x, 'l'], [o.x + o.w, 'r']];   // my left to its right, my right to its left, align lefts, align rights
+    for (const [v, side] of xs) { const mine = side === 'l' ? r.x : r.x + r.w; if (Math.abs(mine - v) < dx) { dx = Math.abs(mine - v); bx = side === 'l' ? v : v - r.w; } }
+    const ys = [[o.y + o.h, 't'], [o.y, 'b'], [o.y, 't'], [o.y + o.h, 'b']];
+    for (const [v, side] of ys) { const mine = side === 't' ? r.y : r.y + r.h; if (Math.abs(mine - v) < dy) { dy = Math.abs(mine - v); by = side === 't' ? v : v - r.h; } }
+  }
+  if (bx !== null) r.x = bx; if (by !== null) r.y = by;
+}
+function ov(a0,a1,b0,b1){ return Math.min(a1,b1) - Math.max(a0,b0); }
+function edges() {
+  const r = S.remote, set = new Set();
+  for (const d of S.displays) {
+    if (Math.abs(d.x + d.w - r.x) < .5 && ov(d.y, d.y+d.h, r.y, r.y+r.h) > 0) set.add('right');
+    if (Math.abs(r.x + r.w - d.x) < .5 && ov(d.y, d.y+d.h, r.y, r.y+r.h) > 0) set.add('left');
+    if (Math.abs(d.y + d.h - r.y) < .5 && ov(d.x, d.x+d.w, r.x, r.x+r.w) > 0) set.add('bottom');
+    if (Math.abs(r.y + r.h - d.y) < .5 && ov(d.x, d.x+d.w, r.x, r.x+r.w) > 0) set.add('top');
+  }
+  return ['left','right','top','bottom'].filter(p => set.has(p));
+}
+['rx','ry','rw','rh'].forEach(k => document.getElementById(k).addEventListener('change', e => { S.remote[k[1]] = Number(e.target.value); layout(); render(); }));
+document.getElementById('reload').onclick = fetchState;
+document.getElementById('useDetected').onclick = () => { if (S.detected) { S.remote.w = S.detected.w; S.remote.h = S.detected.h; layout(); render(); } };
+document.getElementById('apply').onclick = () => {
+  const btn = document.getElementById('apply'); btn.disabled = true;
+  const out = document.getElementById('result'); out.textContent = '应用中…';
+  fetch('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ remote: S.remote, displays: S.displays.filter(d => !d.main).map(d => ({id:d.id, x:d.x, y:d.y})) }) })
+  .then(r => r.json()).then(res => {
+    out.textContent = (res.ok ? '✅ 已应用，穿越方向：' + res.positions.join(', ') : '❌ ' + (res.error || '失败')) + '\n' + (res.steps || []).join('\n');
+    if (res.state) { showDaemon(res.state.daemon); }
+  }).catch(e => out.textContent = '❌ ' + e).finally(() => { btn.disabled = false; });
+};
+window.addEventListener('resize', () => { layout(); render(); });
+fetchState();
+</script>
+</body>
+</html>
