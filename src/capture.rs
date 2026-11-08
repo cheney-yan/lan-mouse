@@ -73,6 +73,7 @@ impl Capture {
         let (event_tx, event_rx) = channel();
         let cancellation_token = CancellationToken::new();
         let capture_task = CaptureTask {
+            ack_deadline: None,
             active_client: None,
             backend,
             cancellation_token: cancellation_token.clone(),
@@ -156,7 +157,20 @@ macro_rules! debounce {
     };
 }
 
+/// how long we wait for the remote to acknowledge an `Enter` before giving
+/// the input back to the local machine (stale connection, remote hung, ...)
+const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+async fn wait_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
+    }
+}
+
 struct CaptureTask {
+    /// deadline for the remote to acknowledge an `Enter`
+    ack_deadline: Option<tokio::time::Instant>,
     active_client: Option<CaptureHandle>,
     backend: Option<input_capture::Backend>,
     cancellation_token: CancellationToken,
@@ -265,10 +279,19 @@ impl CaptureTask {
         capture: &mut InputCapture,
     ) -> Result<(), InputCaptureError> {
         loop {
+            let ack_deadline = self.ack_deadline;
             tokio::select! {
                 event = capture.next() => match event {
                     Some(event) => self.handle_capture_event(capture, event?).await?,
                     None => return Ok(()),
+                },
+                _ = wait_until(ack_deadline), if ack_deadline.is_some() => {
+                    log::warn!(
+                        "releasing capture: client {:?} did not acknowledge within {:?}",
+                        self.active_client, ACK_TIMEOUT
+                    );
+                    self.ack_deadline = None;
+                    self.release_capture(capture).await?;
                 },
                 (handle, event) = self.conn.recv() => {
                     if let Some(active) = self.active_client {
@@ -284,6 +307,7 @@ impl CaptureTask {
                         ProtoEvent::Ack(_) => {
                             log::info!("client {handle} acknowledged the connection!");
                             self.state = State::Sending;
+                            self.ack_deadline = None;
                         }
                         // client disconnected
                         ProtoEvent::Leave(_) => {
@@ -348,6 +372,7 @@ impl CaptureTask {
         // activated a new client
         if event == CaptureEvent::Begin && Some(handle) != self.active_client {
             self.state = State::WaitingForAck;
+            self.ack_deadline = Some(tokio::time::Instant::now() + ACK_TIMEOUT);
             self.active_client.replace(handle);
             self.event_tx
                 .send(ICaptureEvent::ClientEntered(handle))
@@ -374,6 +399,7 @@ impl CaptureTask {
     }
 
     async fn release_capture(&mut self, capture: &mut InputCapture) -> Result<(), CaptureError> {
+        self.ack_deadline = None;
         // If we have an active client, notify them we're leaving
         if let Some(handle) = self.active_client.take() {
             // Synthesize key-up events for every key still held in the
