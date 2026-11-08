@@ -29,6 +29,10 @@ impl Capture for WindowsInputCapture {
         Ok(())
     }
 
+    async fn enter(&mut self, _pos: Position) -> Result<(), CaptureError> {
+        Err(CaptureError::EnterUnsupported)
+    }
+
     async fn release(&mut self) -> Result<(), CaptureError> {
         self.event_thread.release_capture();
         Ok(())

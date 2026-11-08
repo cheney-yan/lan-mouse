@@ -62,6 +62,10 @@ enum CliSubcommand {
     SetIps { id: ClientHandle, ips: Vec<IpAddr> },
     /// re-enable capture
     EnableCapture,
+    /// release the mouse (give input back to this machine)
+    Release,
+    /// enter a client as if the cursor had crossed into it
+    Enter { id: ClientHandle },
     /// re-enable emulation
     EnableEmulation,
     /// authorize a public key
@@ -149,6 +153,8 @@ async fn execute(cmd: CliSubcommand) -> Result<(), CliError> {
             tx.request(FrontendRequest::UpdateFixIps(id, ips)).await?
         }
         CliSubcommand::EnableCapture => tx.request(FrontendRequest::EnableCapture).await?,
+        CliSubcommand::Release => tx.request(FrontendRequest::Release).await?,
+        CliSubcommand::Enter { id } => tx.request(FrontendRequest::Enter(id)).await?,
         CliSubcommand::EnableEmulation => tx.request(FrontendRequest::EnableEmulation).await?,
         CliSubcommand::AuthorizeKey {
             description,

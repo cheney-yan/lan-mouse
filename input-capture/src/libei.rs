@@ -589,6 +589,10 @@ impl LanMouseInputCapture for LibeiInputCapture {
         Ok(())
     }
 
+    async fn enter(&mut self, _pos: Position) -> Result<(), CaptureError> {
+        Err(CaptureError::EnterUnsupported)
+    }
+
     async fn release(&mut self) -> Result<(), CaptureError> {
         self.notify_release.notify_waiters();
         Ok(())

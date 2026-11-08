@@ -94,8 +94,47 @@ impl Region {
     }
 }
 
+/// Fire-and-forget UDP notifications for an optional on-screen HUD
+/// (`LAN_MOUSE_HUD_ADDR`, default 127.0.0.1:4243). One JSON object per
+/// datagram: {"event":"enter"|"leave","position":"right","x":..,"y":..}
+#[derive(Debug)]
+struct Hud {
+    socket: Option<std::net::UdpSocket>,
+    addr: String,
+}
+
+impl Hud {
+    fn new() -> Self {
+        let addr =
+            std::env::var("LAN_MOUSE_HUD_ADDR").unwrap_or_else(|_| "127.0.0.1:4243".to_string());
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").ok();
+        if let Some(s) = &socket {
+            let _ = s.set_nonblocking(true);
+        }
+        Self { socket, addr }
+    }
+
+    fn notify(&self, event: &str, position: Option<Position>, point: Option<CGPoint>) {
+        let Some(socket) = &self.socket else { return };
+        let pos = match position {
+            Some(Position::Left) => "left",
+            Some(Position::Right) => "right",
+            Some(Position::Top) => "top",
+            Some(Position::Bottom) => "bottom",
+            None => "",
+        };
+        let (x, y) = point.map(|p| (p.x, p.y)).unwrap_or((f64::NAN, f64::NAN));
+        let msg = format!(
+            "{{\"event\":\"{event}\",\"position\":\"{pos}\",\"x\":{x:.1},\"y\":{y:.1}}}"
+        );
+        let _ = socket.send_to(msg.as_bytes(), &self.addr);
+    }
+}
+
 #[derive(Debug)]
 struct InputCaptureState {
+    /// optional HUD notifications
+    hud: Hud,
     /// active capture positions
     active_clients: Lazy<HashSet<Position>>,
     /// optional dead-zone regions per position (see [`Region`])
@@ -115,6 +154,7 @@ struct InputCaptureState {
 #[derive(Debug)]
 enum ProducerEvent {
     Release,
+    Enter(Position),
     Create(Position),
     Destroy(Position),
     Grab(Position),
@@ -134,6 +174,7 @@ impl InputCaptureState {
         .filter_map(|p| Region::from_env(p).map(|r| (p, r)))
         .collect();
         let mut res = Self {
+            hud: Hud::new(),
             active_clients: Lazy::new(HashSet::new),
             regions,
             displays: Vec::new(),
@@ -257,9 +298,24 @@ impl InputCaptureState {
         log::debug!("handling event: {producer_event:?}");
         match producer_event {
             ProducerEvent::Release => {
-                if self.current_pos.is_some() {
+                if let Some(pos) = self.current_pos {
                     self.show_cursor()?;
                     self.current_pos = None;
+                    self.hud.notify("leave", Some(pos), self.enter_position);
+                }
+            }
+            ProducerEvent::Enter(pos) => {
+                if self.current_pos.is_none() && self.active_clients.contains(&pos) {
+                    let location = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+                        .and_then(CGEvent::new)
+                        .map(|e| e.location())
+                        .map_err(|_| CaptureError::ResetMouseWithoutClient)?;
+                    self.enter_position = Some(location);
+                    self.hide_cursor()?;
+                    self.current_pos = Some(pos);
+                    self.hud.notify("enter", Some(pos), Some(location));
+                } else {
+                    log::warn!("cannot enter {pos:?}: already capturing or no such client");
                 }
             }
             ProducerEvent::Grab(pos) => {
@@ -276,6 +332,7 @@ impl InputCaptureState {
                     if current == p {
                         self.show_cursor()?;
                         self.current_pos = None;
+                        self.hud.notify("leave", Some(p), self.enter_position);
                     };
                 }
                 self.active_clients.remove(&p);
@@ -285,9 +342,9 @@ impl InputCaptureState {
                 // revoked, tap-timeout, etc). Release state so we
                 // don't leave the cursor hidden even if the outer
                 // task only logs this error rather than propagating.
-                if self.current_pos.is_some() {
+                if let Some(pos) = self.current_pos.take() {
                     self.show_cursor()?;
-                    self.current_pos = None;
+                    self.hud.notify("leave", Some(pos), self.enter_position);
                 }
                 return Err(CaptureError::EventTapDisabled);
             }
@@ -625,6 +682,7 @@ fn create_event_tap<'a>(
                 state
                     .start_capture(cg_ev, new_pos)
                     .unwrap_or_else(|e| log::warn!("{e}"));
+                state.hud.notify("enter", Some(new_pos), state.enter_position);
                 res_events.push(CaptureEvent::Begin);
                 notify_tx
                     .blocking_send(ProducerEvent::Grab(new_pos))
@@ -764,6 +822,7 @@ impl MacOSInputCapture {
 
         let state = Arc::new(Mutex::new(InputCaptureState::new()?));
         let (event_tx, event_rx) = mpsc::channel(32);
+        let begin_tx = event_tx.clone();
         let (notify_tx, mut notify_rx) = mpsc::channel(32);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (tap_exit_tx, mut tap_exit_rx) = oneshot::channel();
@@ -795,10 +854,20 @@ impl MacOSInputCapture {
                         let Some(producer_event) = producer_event else {
                             break;
                         };
+                        let entering = match producer_event {
+                            ProducerEvent::Enter(p) => Some(p),
+                            _ => None,
+                        };
                         let mut state = state.lock().await;
                         state.handle_producer_event(producer_event).await.unwrap_or_else(|e| {
                             log::error!("Failed to handle producer event: {e}");
-                        })
+                        });
+                        // programmatic enter succeeded => emit Begin like a barrier crossing
+                        let begin = entering.filter(|p| state.current_pos == Some(*p));
+                        drop(state);
+                        if let Some(p) = begin {
+                            let _ = begin_tx.send((p, CaptureEvent::Begin)).await;
+                        }
                     }
                     _ = &mut tap_exit_rx => break,
                 }
@@ -880,6 +949,15 @@ impl Capture for MacOSInputCapture {
         tokio::task::spawn_local(async move {
             log::debug!("notifying Release");
             let _ = notify_tx.send(ProducerEvent::Release).await;
+        });
+        Ok(())
+    }
+
+    async fn enter(&mut self, pos: Position) -> Result<(), CaptureError> {
+        let notify_tx = self.notify_tx.clone();
+        tokio::task::spawn_local(async move {
+            log::debug!("notifying Enter {pos:?}");
+            let _ = notify_tx.send(ProducerEvent::Enter(pos)).await;
         });
         Ok(())
     }

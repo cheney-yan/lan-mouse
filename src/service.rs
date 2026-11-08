@@ -190,6 +190,8 @@ impl Service {
                 self.save_config();
             }
             FrontendRequest::EnableCapture => self.capture.reenable(),
+            FrontendRequest::Release => self.capture.release(),
+            FrontendRequest::Enter(handle) => self.capture.enter(handle),
             FrontendRequest::EnableEmulation => self.emulation.reenable(),
             FrontendRequest::Enumerate() => self.enumerate(),
             FrontendRequest::UpdateFixIps(handle, fix_ips) => {

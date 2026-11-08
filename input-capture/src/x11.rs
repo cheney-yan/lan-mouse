@@ -23,6 +23,10 @@ impl Capture for X11InputCapture {
         Ok(())
     }
 
+    async fn enter(&mut self, _pos: Position) -> Result<(), CaptureError> {
+        Err(CaptureError::EnterUnsupported)
+    }
+
     async fn release(&mut self) -> Result<(), CaptureError> {
         Ok(())
     }

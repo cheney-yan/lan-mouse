@@ -243,6 +243,10 @@ pub enum FrontendRequest {
     UpdateFixIps(ClientHandle, Vec<IpAddr>),
     /// request reenabling input capture
     EnableCapture,
+    /// release the mouse (give input back to this machine)
+    Release,
+    /// enter a client as if the cursor had crossed into it
+    Enter(ClientHandle),
     /// request reenabling input emulation
     EnableEmulation,
     /// synchronize all state

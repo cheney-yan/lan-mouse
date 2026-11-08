@@ -171,6 +171,12 @@ impl InputCapture {
         self.capture.release().await
     }
 
+    /// enter the client with the given id programmatically
+    pub async fn enter(&mut self, id: CaptureHandle) -> Result<(), CaptureError> {
+        let pos = *self.id_map.get(&id).ok_or(CaptureError::NoSuchHandle)?;
+        self.capture.enter(pos).await
+    }
+
     /// Drain and return every key the capture has forwarded as
     /// down-but-not-up. The caller is expected to synthesize key-up
     /// events to the remote peer for each — otherwise the peer
@@ -286,6 +292,10 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
 
     /// release mouse
     async fn release(&mut self) -> Result<(), CaptureError>;
+
+    /// start capturing for the client at `pos` as if the cursor had
+    /// crossed its barrier (backends may return `EnterUnsupported`)
+    async fn enter(&mut self, pos: Position) -> Result<(), CaptureError>;
 
     /// destroy the input capture
     async fn terminate(&mut self) -> Result<(), CaptureError>;
