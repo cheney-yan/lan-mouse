@@ -20,7 +20,13 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
+
+/// An `Enter` from a host we are currently controlling that arrives this
+/// soon after we entered it is feedback (our emulated motion re-captured
+/// by its own barrier), not the user coming back.
+const RETURN_FEEDBACK_WINDOW: Duration = Duration::from_millis(300);
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
 
@@ -69,6 +75,8 @@ pub struct Service {
     incoming_conns: HashSet<SocketAddr>,
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
+    /// when we last entered one of our clients
+    last_client_entered: Option<Instant>,
     next_trigger_handle: u64,
 }
 
@@ -124,6 +132,7 @@ impl Service {
             capture_status: Default::default(),
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
+            last_client_entered: None,
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
         };
@@ -284,6 +293,7 @@ impl Service {
                 pos,
                 fingerprint,
             } => {
+                let is_return = self.controls_fingerprint(&fingerprint);
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {
                     self.add_incoming(addr, pos, fingerprint.clone());
@@ -294,6 +304,14 @@ impl Service {
                     });
                 } else {
                     self.update_incoming(addr, pos, fingerprint);
+                }
+                // A host we control (one of our clients) has hit its own barrier
+                // towards us: that is the cursor coming back, not someone over
+                // there wanting to use this machine. Tell its capture to let go
+                // immediately so its pointer is free again and does not keep
+                // re-sending our own motion back to us.
+                if is_return {
+                    self.emulation.send_leave_event(addr);
                 }
             }
             EmulationEvent::Disconnected { addr } => {
@@ -317,11 +335,34 @@ impl Service {
                 self.emulation_status = Status::Enabled;
                 self.notify_frontend(FrontendEvent::EmulationStatus(self.emulation_status));
             }
-            EmulationEvent::ReleaseNotify => self.capture.release(),
+            EmulationEvent::ReleaseNotify => {
+                let feedback = self
+                    .last_client_entered
+                    .is_some_and(|t| t.elapsed() < RETURN_FEEDBACK_WINDOW);
+                if feedback {
+                    log::debug!("ignoring release notify right after entering a client (feedback)");
+                } else {
+                    self.capture.release()
+                }
+            }
             EmulationEvent::Connected { addr, fingerprint } => {
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
             }
         }
+    }
+
+    /// whether the given fingerprint belongs to a host configured as one of our clients
+    fn controls_fingerprint(&self, fingerprint: &str) -> bool {
+        let name = {
+            let keys = self.authorized_keys.read().expect("lock");
+            keys.get(fingerprint).cloned()
+        };
+        let Some(name) = name else { return false };
+        self.client_manager
+            .active_clients()
+            .into_iter()
+            .filter_map(|h| self.client_manager.get_hostname(h))
+            .any(|h| h.eq_ignore_ascii_case(&name))
     }
 
     fn handle_capture_event(&mut self, event: ICaptureEvent) {
@@ -343,6 +384,7 @@ impl Service {
             }
             ICaptureEvent::ClientEntered(handle) => {
                 log::info!("entering client {handle} ...");
+                self.last_client_entered = Some(Instant::now());
                 self.spawn_hook_command(handle);
             }
         }

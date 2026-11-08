@@ -66,6 +66,13 @@ impl Region {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 
+    fn near(&self, x: f64, y: f64, margin: f64) -> bool {
+        x >= self.x - margin
+            && x < self.x + self.w + margin
+            && y >= self.y - margin
+            && y < self.y + self.h + margin
+    }
+
     fn from_env(position: Position) -> Option<Self> {
         let var = match position {
             Position::Left => "LAN_MOUSE_REGION_LEFT",
@@ -205,12 +212,17 @@ impl InputCaptureState {
                     Position::Top => relative_y < 0.0 && location.y >= region.y + region.h,
                     Position::Bottom => relative_y > 0.0 && location.y < region.y,
                 };
-                if direction_ok
-                    && region.contains(target_x, target_y)
-                    && !self.on_any_display(target_x, target_y)
-                {
+                let in_region = region.contains(target_x, target_y);
+                let on_display = self.on_any_display(target_x, target_y);
+                if direction_ok && in_region && !on_display {
                     log::debug!("Crossed into region of position: {position:?}");
                     return Some(position);
+                }
+                if in_region || region.near(target_x, target_y, 3.0) {
+                    log::debug!(
+                        "no crossing for {position:?}: loc=({:.1},{:.1}) d=({:.1},{:.1}) target=({:.1},{:.1}) direction_ok={direction_ok} in_region={in_region} on_display={on_display}",
+                        location.x, location.y, relative_x, relative_y, target_x, target_y
+                    );
                 }
                 continue;
             }
