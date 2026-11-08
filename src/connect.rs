@@ -94,11 +94,13 @@ async fn connect_any(
 pub(crate) struct LanMouseConnection {
     cert: Certificate,
     client_manager: ClientManager,
-    conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
+    /// live connections keyed by client handle (two clients may share
+    /// the same remote address, e.g. one host reachable from two edges)
+    conns: Rc<Mutex<HashMap<ClientHandle, Arc<dyn Conn + Send + Sync>>>>,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     recv_rx: Receiver<(ClientHandle, ProtoEvent)>,
     recv_tx: Sender<(ClientHandle, ProtoEvent)>,
-    ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
 }
 
 impl LanMouseConnection {
@@ -129,7 +131,7 @@ impl LanMouseConnection {
         if let Some(addr) = self.client_manager.active_addr(handle) {
             let conn = {
                 let conns = self.conns.lock().await;
-                conns.get(&addr).cloned()
+                conns.get(&handle).cloned()
             };
             if let Some(conn) = conn {
                 if !self.client_manager.alive(handle) {
@@ -170,10 +172,10 @@ async fn connect_to_handle(
     client_manager: ClientManager,
     cert: Certificate,
     handle: ClientHandle,
-    conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
+    conns: Rc<Mutex<HashMap<ClientHandle, Arc<dyn Conn + Send + Sync>>>>,
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
-    ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
 ) -> Result<(), LanMouseConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
@@ -194,11 +196,11 @@ async fn connect_to_handle(
         };
         log::info!("client ({handle}) connected @ {addr}");
         client_manager.set_active_addr(handle, Some(addr));
-        conns.lock().await.insert(addr, conn.clone());
+        conns.lock().await.insert(handle, conn.clone());
         connecting.lock().await.remove(&handle);
 
         // poll connection for active
-        spawn_local(ping_pong(addr, conn.clone(), ping_response.clone()));
+        spawn_local(ping_pong(handle, addr, conn.clone(), ping_response.clone()));
 
         // receiver
         spawn_local(receive_loop(
@@ -217,9 +219,10 @@ async fn connect_to_handle(
 }
 
 async fn ping_pong(
+    handle: ClientHandle,
     addr: SocketAddr,
     conn: Arc<dyn Conn + Send + Sync>,
-    ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
 ) {
     loop {
         let (buf, len) = ProtoEvent::Ping.into();
@@ -236,8 +239,8 @@ async fn ping_pong(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        if !ping_response.borrow_mut().remove(&addr) {
-            log::warn!("{addr} did not respond, closing connection");
+        if !ping_response.borrow_mut().remove(&handle) {
+            log::warn!("client {handle} @ {addr} did not respond, closing connection");
             let _ = conn.close().await;
             return;
         }
@@ -249,9 +252,9 @@ async fn receive_loop(
     handle: ClientHandle,
     addr: SocketAddr,
     conn: Arc<dyn Conn + Send + Sync>,
-    conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
+    conns: Rc<Mutex<HashMap<ClientHandle, Arc<dyn Conn + Send + Sync>>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
-    ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
 ) {
     let mut buf = [0u8; MAX_EVENT_SIZE];
     while conn.recv(&mut buf).await.is_ok() {
@@ -261,7 +264,7 @@ async fn receive_loop(
                 ProtoEvent::Pong(b) => {
                     client_manager.set_active_addr(handle, Some(addr));
                     client_manager.set_alive(handle, b);
-                    ping_response.borrow_mut().insert(addr);
+                    ping_response.borrow_mut().insert(handle);
                 }
                 event => tx.send((handle, event)).expect("channel closed"),
             }
@@ -275,11 +278,11 @@ async fn disconnect(
     client_manager: &ClientManager,
     handle: ClientHandle,
     addr: SocketAddr,
-    conns: &Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>,
+    conns: &Mutex<HashMap<ClientHandle, Arc<dyn Conn + Send + Sync>>>,
 ) {
     log::warn!("client ({handle}) @ {addr} connection closed");
-    conns.lock().await.remove(&addr);
+    conns.lock().await.remove(&handle);
     client_manager.set_active_addr(handle, None);
-    let active: Vec<SocketAddr> = conns.lock().await.keys().copied().collect();
+    let active: Vec<ClientHandle> = conns.lock().await.keys().copied().collect();
     log::info!("active connections: {active:?}");
 }

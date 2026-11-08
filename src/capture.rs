@@ -176,6 +176,11 @@ const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 /// not bounce straight back
 const LEAVE_GRACE: Duration = Duration::from_millis(250);
 
+/// how often we make sure every active client has a live connection, so
+/// the first crossing after start-up (or after a drop) does not have to
+/// wait for a DTLS handshake
+const WARM_INTERVAL: Duration = Duration::from_secs(10);
+
 async fn wait_until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(d) => tokio::time::sleep_until(d).await,
@@ -295,9 +300,22 @@ impl CaptureTask {
         &mut self,
         capture: &mut InputCapture,
     ) -> Result<(), InputCaptureError> {
+        let mut warm = tokio::time::interval(WARM_INTERVAL);
+        warm.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let ack_deadline = self.ack_deadline;
             tokio::select! {
+                _ = warm.tick() => {
+                    // a Ping to a not-yet-connected client triggers the
+                    // connection attempt; to a connected one it is harmless
+                    let handles: Vec<CaptureHandle> = self.captures.iter()
+                        .filter(|(_, _, t)| *t == CaptureType::Default)
+                        .map(|(h, _, _)| *h)
+                        .collect();
+                    for h in handles {
+                        let _ = self.conn.send(ProtoEvent::Ping, h).await;
+                    }
+                },
                 event = capture.next() => match event {
                     Some(event) => self.handle_capture_event(capture, event?).await?,
                     None => return Ok(()),
