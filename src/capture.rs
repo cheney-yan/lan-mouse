@@ -74,6 +74,7 @@ impl Capture {
         let cancellation_token = CancellationToken::new();
         let capture_task = CaptureTask {
             ack_deadline: None,
+            entered_at: None,
             active_client: None,
             backend,
             cancellation_token: cancellation_token.clone(),
@@ -161,6 +162,12 @@ macro_rules! debounce {
 /// the input back to the local machine (stale connection, remote hung, ...)
 const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// a `Leave` arriving this soon after we entered a client is almost always
+/// the remote's own return barrier firing because its cursor was still
+/// parked on that edge from the previous exit; ignore it so entering does
+/// not bounce straight back
+const LEAVE_GRACE: Duration = Duration::from_millis(250);
+
 async fn wait_until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(d) => tokio::time::sleep_until(d).await,
@@ -171,6 +178,8 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 struct CaptureTask {
     /// deadline for the remote to acknowledge an `Enter`
     ack_deadline: Option<tokio::time::Instant>,
+    /// when the current client was entered
+    entered_at: Option<Instant>,
     active_client: Option<CaptureHandle>,
     backend: Option<input_capture::Backend>,
     cancellation_token: CancellationToken,
@@ -311,6 +320,10 @@ impl CaptureTask {
                         }
                         // client disconnected
                         ProtoEvent::Leave(_) => {
+                            if self.entered_at.is_some_and(|t| t.elapsed() < LEAVE_GRACE) {
+                                log::debug!("ignoring Leave from client {handle} within {LEAVE_GRACE:?} of entering");
+                                continue;
+                            }
                             log::info!("releasing capture: left remote client device region");
                             self.release_capture(capture).await?;
                         },
@@ -373,6 +386,7 @@ impl CaptureTask {
         if event == CaptureEvent::Begin && Some(handle) != self.active_client {
             self.state = State::WaitingForAck;
             self.ack_deadline = Some(tokio::time::Instant::now() + ACK_TIMEOUT);
+            self.entered_at = Some(Instant::now());
             self.active_client.replace(handle);
             self.event_tx
                 .send(ICaptureEvent::ClientEntered(handle))
@@ -400,6 +414,7 @@ impl CaptureTask {
 
     async fn release_capture(&mut self, capture: &mut InputCapture) -> Result<(), CaptureError> {
         self.ack_deadline = None;
+        self.entered_at = None;
         // If we have an active client, notify them we're leaving
         if let Some(handle) = self.active_client.take() {
             // Synthesize key-up events for every key still held in the
