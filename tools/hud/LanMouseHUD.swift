@@ -71,24 +71,33 @@ final class HUD {
         a.fillMode = .both; a.isRemovedOnCompletion = false
         layer.add(a, forKey: "fade")
     }
-    func edgeBar(at cg: CGPoint, position: String, seconds: Double = 0.9) {
+    /// soft glow on the screen edge: widest and strongest at the crossing point, fading out along the edge
+    func edgeBar(at cg: CGPoint, position: String, seconds: Double = 0.9, strength: CGFloat = 1.0) {
         let p = appKit(cg); guard let (w, local) = window(at: p) else { return }
         let vertical = position == "left" || position == "right"
-        let length: CGFloat = 420, thick: CGFloat = 16
-        let bar = CALayer()
-        bar.frame = vertical ? CGRect(x: local.x - thick / 2, y: local.y - length / 2, width: thick, height: length)
-                             : CGRect(x: local.x - length / 2, y: local.y - thick / 2, width: length, height: thick)
-        // keep the bar inside the screen (it sits on the edge)
-        if position == "right" { bar.frame.origin.x = w.frame.width - thick }
-        if position == "left" { bar.frame.origin.x = 0 }
-        if position == "bottom" { bar.frame.origin.y = 0 }
-        if position == "top" { bar.frame.origin.y = w.frame.height - thick }
-        bar.cornerRadius = thick / 2
-        bar.backgroundColor = accent.withAlphaComponent(0.55).cgColor
-        bar.shadowColor = accent.cgColor; bar.shadowOpacity = 0.9; bar.shadowRadius = 18; bar.shadowOffset = .zero
-        addTemp(bar, to: w, for: seconds)
-        fade(bar, from: 1, to: 0, duration: seconds * 0.7, delay: seconds * 0.3)
-        ring(at: cg, radius: 46, seconds: seconds)
+        let along: CGFloat = 1100 * strength, inward: CGFloat = 170 * strength
+        let g = CAGradientLayer()
+        g.type = .radial
+        g.colors = [accent.withAlphaComponent(0.85).cgColor, accent.withAlphaComponent(0.45).cgColor,
+                    accent.withAlphaComponent(0.12).cgColor, accent.withAlphaComponent(0).cgColor]
+        g.locations = [0, 0.18, 0.55, 1]
+        // ellipse centred ON the edge, so only the inner half is visible: thick at the point, thin further away
+        let size = vertical ? CGSize(width: inward * 2, height: along) : CGSize(width: along, height: inward * 2)
+        var center = local
+        switch position {
+        case "right": center.x = w.frame.width
+        case "left": center.x = 0
+        case "bottom": center.y = 0
+        case "top": center.y = w.frame.height
+        default: break
+        }
+        g.frame = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
+        g.startPoint = CGPoint(x: 0.5, y: 0.5); g.endPoint = CGPoint(x: 1, y: 1)
+        addTemp(g, to: w, for: seconds)
+        let grow = CABasicAnimation(keyPath: "transform.scale"); grow.fromValue = 0.6; grow.toValue = 1.0
+        grow.duration = seconds * 0.35; grow.fillMode = .both; grow.isRemovedOnCompletion = false
+        g.add(grow, forKey: "grow")
+        fade(g, from: 1, to: 0, duration: seconds * 0.6, delay: seconds * 0.4)
     }
     func ring(at cg: CGPoint, radius: CGFloat, seconds: Double, delay: Double = 0) {
         let p = appKit(cg); guard let (w, local) = window(at: p) else { return }
@@ -130,7 +139,9 @@ final class HUD {
             case "enter":
                 self.captured = true; self.lastPosition = pos; if let pt = pt { self.lastPoint = pt; self.edgeBar(at: pt, position: pos) }
             case "leave":
-                self.captured = false; if let pt = pt { self.lastPoint = pt; self.ring(at: pt, radius: 60, seconds: 0.7); self.ring(at: pt, radius: 60, seconds: 0.7, delay: 0.25) }
+                self.captured = false; if let pt = pt { self.lastPoint = pt; self.edgeBar(at: pt, position: pos, seconds: 0.7, strength: 0.7) }
+            case "locate":
+                self.locate()
             default: break
             }
         }

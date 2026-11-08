@@ -77,6 +77,7 @@ impl Capture {
         let capture_task = CaptureTask {
             ack_deadline: None,
             entered_at: None,
+            locate_sent: false,
             active_client: None,
             backend,
             cancellation_token: cancellation_token.clone(),
@@ -181,6 +182,30 @@ const LEAVE_GRACE: Duration = Duration::from_millis(250);
 /// wait for a DTLS handshake
 const WARM_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Ctrl+Alt+Meta+K while a client is captured: give the mouse back
+/// (the same chord is used by the HUD to *enter* a client when local)
+const TOGGLE_BIND: [scancode::Linux; 4] = [
+    scancode::Linux::KeyLeftCtrl,
+    scancode::Linux::KeyLeftAlt,
+    scancode::Linux::KeyLeftMeta,
+    scancode::Linux::KeyK,
+];
+/// Ctrl+Alt+Meta+L while a client is captured: ask the HUD to show
+/// where the mouse went (the HUD cannot see keys while we capture them)
+const LOCATE_BIND: [scancode::Linux; 4] = [
+    scancode::Linux::KeyLeftCtrl,
+    scancode::Linux::KeyLeftAlt,
+    scancode::Linux::KeyLeftMeta,
+    scancode::Linux::KeyL,
+];
+
+fn notify_hud(event: &str) {
+    let addr = std::env::var("LAN_MOUSE_HUD_ADDR").unwrap_or_else(|_| "127.0.0.1:4243".to_string());
+    if let Ok(sock) = std::net::UdpSocket::bind("127.0.0.1:0") {
+        let _ = sock.send_to(format!("{{\"event\":\"{event}\"}}").as_bytes(), addr);
+    }
+}
+
 async fn wait_until(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(d) => tokio::time::sleep_until(d).await,
@@ -193,6 +218,8 @@ struct CaptureTask {
     ack_deadline: Option<tokio::time::Instant>,
     /// when the current client was entered
     entered_at: Option<Instant>,
+    /// locate chord already reported for the current key-down
+    locate_sent: bool,
     active_client: Option<CaptureHandle>,
     backend: Option<input_capture::Backend>,
     cancellation_token: CancellationToken,
@@ -393,6 +420,18 @@ impl CaptureTask {
         if capture.keys_pressed(&self.release_bind.borrow()) {
             log::info!("releasing capture: release-bind pressed");
             return self.release_capture(capture).await;
+        }
+        if capture.keys_pressed(&TOGGLE_BIND) {
+            log::info!("releasing capture: toggle chord pressed");
+            return self.release_capture(capture).await;
+        }
+        if capture.keys_pressed(&LOCATE_BIND) {
+            if !self.locate_sent {
+                self.locate_sent = true;
+                notify_hud("locate");
+            }
+        } else {
+            self.locate_sent = false;
         }
 
         if event == CaptureEvent::Begin {
