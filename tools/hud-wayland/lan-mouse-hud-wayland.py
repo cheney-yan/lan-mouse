@@ -104,6 +104,9 @@ class Overlay(Gtk.Window):
             rx, ry = along / 2, inward
         scale = 0.6 + 0.4 * min(1.0, p / 0.35)
         alpha = 1.0 if p < 0.4 else max(0.0, 1.0 - (p - 0.4) / 0.6)
+        if os.environ.get("LAN_MOUSE_HUD_DEBUG") and not getattr(e, "logged", False):
+            e.logged = True
+            print(f"edge {e.position} f={f} area={w}x{h} centre=({cx:.0f},{cy:.0f}) r=({rx:.0f},{ry:.0f}) scale={scale:.2f} alpha={alpha:.2f}", flush=True)
         r, g, b = ACCENT
         grad = cairo.RadialGradient(0, 0, 0, 0, 0, 1)
         grad.add_color_stop_rgba(0.00, r, g, b, 0.85 * alpha)
