@@ -195,6 +195,13 @@ const WARM_INTERVAL: Duration = Duration::from_secs(10);
 /// ("go by direction, not by pixels"). `None`: the actual crossing point.
 const ENTRY_FRACTION: Option<f64> = Some(0.5);
 
+/// LAN_MOUSE_NO_PLACEMENT=1 switches every automatic cursor placement off:
+/// we send the legacy Enter (no position) and ignore positions we receive.
+/// The cursor then only ever moves with the user's hand.
+pub(crate) fn placement_disabled() -> bool {
+    std::env::var_os("LAN_MOUSE_NO_PLACEMENT").is_some()
+}
+
 /// Ctrl+Alt+Meta+K while a client is captured: give the mouse back
 /// (the same chord is used by the HUD to *enter* a client when local)
 const TOGGLE_BIND: [scancode::Linux; 4] = [
@@ -497,7 +504,7 @@ impl CaptureTask {
         // EnterAt carries the crossing point. Upstream peers drop the
         // connection on an unknown event, so it is only sent to peers that
         // announced support in their Pong; everyone else gets the legacy Enter.
-        let capable = self.conn.supports_enter_at(handle);
+        let capable = self.conn.supports_enter_at(handle) && !placement_disabled();
         let enter_event = |frac: Option<f64>| match ENTRY_FRACTION.or(frac) {
             Some(f) if capable => ProtoEvent::EnterAt(opposite_pos, f),
             _ => ProtoEvent::Enter(opposite_pos),

@@ -126,6 +126,10 @@ struct State {
     /// our own virtual pointer, used only to nudge the real pointer off a
     /// barrier after a capture ends (None if the compositor lacks the protocol)
     nudge_pointer: Option<ZwlrVirtualPointerV1>,
+    /// when we last ungrabbed: a pointer Enter on a strip right after that is
+    /// the compositor re-delivering focus for the pointer still sitting on the
+    /// strip (before our nudge took effect), not the user crossing again
+    last_ungrab: Option<std::time::Instant>,
     keyboard: Option<WlKeyboard>,
     pointer_lock: Option<ZwpLockedPointerV1>,
     rel_pointer: Option<ZwpRelativePointerV1>,
@@ -336,6 +340,7 @@ impl LayerShellInputCapture {
             active_positions: Default::default(),
             pointer: None,
             nudge_pointer,
+            last_ungrab: None,
             keyboard: None,
             global_list,
             globals: Globals {
@@ -529,6 +534,7 @@ impl State {
             self.shortcut_inhibitor = None;
         }
 
+        self.last_ungrab = Some(std::time::Instant::now());
         // move the pointer off the barrier strip, otherwise the next time the
         // strip is (re)created the pointer is already inside it and the
         // capture fires again without anyone touching the mouse
@@ -786,6 +792,13 @@ impl Dispatch<WlPointer, ()> for State {
                 surface_x,
                 surface_y,
             } => {
+                if app
+                    .last_ungrab
+                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300))
+                {
+                    log::debug!("ignoring strip enter {:?} after ungrab", app.last_ungrab.map(|t| t.elapsed()));
+                    return;
+                }
                 // get client corresponding to the focused surface
                 {
                     if let Some(window) = app.active_windows.iter().find(|w| w.surface == surface) {

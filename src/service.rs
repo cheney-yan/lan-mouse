@@ -307,15 +307,30 @@ impl Service {
                 // pointer for the newcomer. Either way nothing is sent back
                 // except the Ack: only the side holding the mouse ever sends
                 // a Leave, when it lets go.
-                let returning_client = self.client_at_named(pos, &fingerprint).filter(|&h| {
-                    self.controlling == Some(h)
-                        || self
-                            .recently_controlled
-                            .is_some_and(|(r, t)| r == h && t.elapsed() < Duration::from_secs(1))
-                });
+                // the host is "ours" if the client we are sending to (or were,
+                // within the last second) belongs to it; it may come back
+                // through any of its edges, not only the one we entered by
+                let host_of = |h: ClientHandle| self.client_manager.get_hostname(h);
+                let name = self.authorized_keys.read().expect("lock").get(&fingerprint).cloned();
+                let ours = |h: Option<ClientHandle>| {
+                    h.and_then(host_of).zip(name.as_ref()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+                };
+                let host_controlled = ours(self.controlling)
+                    || self
+                        .recently_controlled
+                        .filter(|(_, t)| t.elapsed() < Duration::from_secs(1))
+                        .is_some_and(|(h, _)| ours(Some(h)));
+                let returning_client = if host_controlled {
+                    // geometry of the edge it came back through (fall back to any client of that host)
+                    self.client_at_named(pos, &fingerprint).or(self.controlling)
+                } else {
+                    None
+                };
+                let fraction = if crate::capture::placement_disabled() { None } else { fraction };
                 match (returning_client, fraction) {
                     (Some(handle), Some(f)) => self.capture.set_return_point(handle, f),
-                    (None, Some(f)) => self.emulation.enter_at(addr, pos, f),
+                    // never place OUR cursor for a host we control: that is our own mouse coming back
+                    (None, Some(f)) if !host_controlled => self.emulation.enter_at(addr, pos, f),
                     _ => {}
                 }
                 // check if already registered
