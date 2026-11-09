@@ -48,6 +48,6 @@ ok=1
 grep -q "acknowledged the connection" "$T/A/run.log" || { echo "FAIL: sender never got an Ack"; ok=0; }
 grep -q "entered this device" "$T/B/run.log" || { echo "FAIL: receiver never saw Enter"; ok=0; }
 if "$B_BIN" --version 2>/dev/null | grep -q "tag:" && grep -q "EnterAt" "$T/B/run.log"; then
-  grep -q "enter_at: .* edge=Right fraction=0.500" "$T/B/run.log" || { echo "FAIL: receiver did not place the pointer at edge Right / 0.5 (middle of the edge)"; ok=0; }
+  grep -q "enter_at: .* edge=Right fraction=0.250" "$T/B/run.log" || { echo "FAIL: receiver did not place the pointer at edge Right / 0.25 (proportional)"; ok=0; }
 fi
 [ $ok = 1 ] && echo "PASS ($T)" || { echo "logs in $T"; exit 1; }

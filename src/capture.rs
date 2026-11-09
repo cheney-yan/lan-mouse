@@ -190,10 +190,16 @@ const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 const WARM_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Where along the shared edge the cursor appears on the other device.
-/// `Some(0.5)`: always the middle of the edge, regardless of where the
-/// cursor crossed: predictable, and independent of the two screens' sizes
-/// ("go by direction, not by pixels"). `None`: the actual crossing point.
-const ENTRY_FRACTION: Option<f64> = Some(0.5);
+/// LAN_MOUSE_ENTRY=center: always the middle of the edge. Otherwise
+/// (default) the same *proportion* of the edge the cursor crossed at: the
+/// fraction 0..1 travels in the protocol and each side maps it onto its own
+/// edge length, so differing resolutions cannot misplace it.
+fn entry_fraction() -> Option<f64> {
+    match std::env::var("LAN_MOUSE_ENTRY").as_deref() {
+        Ok("center") => Some(0.5),
+        _ => None,
+    }
+}
 
 /// LAN_MOUSE_NO_PLACEMENT=1 switches every automatic cursor placement off:
 /// we send the legacy Enter (no position) and ignore positions we receive.
@@ -505,7 +511,7 @@ impl CaptureTask {
         // connection on an unknown event, so it is only sent to peers that
         // announced support in their Pong; everyone else gets the legacy Enter.
         let capable = self.conn.supports_enter_at(handle) && !placement_disabled();
-        let enter_event = |frac: Option<f64>| match ENTRY_FRACTION.or(frac) {
+        let enter_event = |frac: Option<f64>| match entry_fraction().or(frac) {
             Some(f) if capable => ProtoEvent::EnterAt(opposite_pos, f),
             _ => ProtoEvent::Enter(opposite_pos),
         };
