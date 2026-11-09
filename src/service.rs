@@ -77,6 +77,8 @@ pub struct Service {
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
     /// when we last entered one of our clients
     last_client_entered: Option<Instant>,
+    /// the client we are currently sending input to, if any
+    controlling: Option<ClientHandle>,
     next_trigger_handle: u64,
 }
 
@@ -133,6 +135,7 @@ impl Service {
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
             last_client_entered: None,
+            controlling: None,
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
         };
@@ -296,10 +299,16 @@ impl Service {
             } => {
                 let is_return = self.controls_fingerprint(&fingerprint);
                 if is_return {
-                    // the cursor comes back through `fraction` of the edge of
-                    // our client sitting at `pos`: put it at the matching spot
-                    if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
-                        self.capture.set_return_point(handle, f);
+                    // A host we control hit its barrier towards us. That is the
+                    // cursor coming back only while we are actually sending to
+                    // it; otherwise its pointer is just parked on the barrier
+                    // (we ask it to let go below, and leave our cursor alone).
+                    if self.controlling.is_some() {
+                        if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
+                            self.capture.set_return_point(handle, f);
+                        }
+                    } else {
+                        log::debug!("ignoring enter from controlled host {addr}: not controlling it");
                     }
                 } else if let Some(f) = fraction {
                     // someone else is entering this device: place the pointer
@@ -408,9 +417,13 @@ impl Service {
                 self.capture_status = Status::Enabled;
                 self.notify_frontend(FrontendEvent::CaptureStatus(self.capture_status));
             }
+            ICaptureEvent::CaptureReleased(_) => {
+                self.controlling = None;
+            }
             ICaptureEvent::ClientEntered(handle) => {
                 log::info!("entering client {handle} ...");
                 self.last_client_entered = Some(Instant::now());
+                self.controlling = Some(handle);
                 self.spawn_hook_command(handle);
             }
         }

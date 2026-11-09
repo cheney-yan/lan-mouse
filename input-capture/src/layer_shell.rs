@@ -43,6 +43,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
+use wayland_protocols_wlr::virtual_pointer::v1::client::{
+    zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
+    zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+};
 
 use wayland_client::{
     Connection, Dispatch, DispatchError, EventQueue, QueueHandle, WEnum,
@@ -112,9 +116,16 @@ struct OutputInfo {
     size: (i32, i32),
 }
 
+/// how far (px) the pointer is pushed back inside the screen when a capture
+/// ends, so it does not stay parked on the barrier strip and re-trigger it
+const UNGRAB_NUDGE: f64 = 8.0;
+
 struct State {
     active_positions: HashSet<Position>,
     pointer: Option<WlPointer>,
+    /// our own virtual pointer, used only to nudge the real pointer off a
+    /// barrier after a capture ends (None if the compositor lacks the protocol)
+    nudge_pointer: Option<ZwlrVirtualPointerV1>,
     keyboard: Option<WlKeyboard>,
     pointer_lock: Option<ZwpLockedPointerV1>,
     rel_pointer: Option<ZwpRelativePointerV1>,
@@ -298,6 +309,13 @@ impl LayerShellInputCapture {
         let pointer_constraints: ZwpPointerConstraintsV1 = global_list
             .bind(&qh, 1..=1, ())
             .map_err(|e| WaylandBindError::new(e, "zwp_pointer_constraints_v1"))?;
+        let nudge_pointer = global_list
+            .bind::<ZwlrVirtualPointerManagerV1, _, _>(&qh, 1..=2, ())
+            .ok()
+            .map(|vpm| vpm.create_virtual_pointer(None, &qh, ()));
+        if nudge_pointer.is_none() {
+            log::warn!("no wlr-virtual-pointer: cannot nudge the pointer off the barrier after release");
+        }
         let relative_pointer_manager: ZwpRelativePointerManagerV1 = global_list
             .bind(&qh, 1..=1, ())
             .map_err(|e| WaylandBindError::new(e, "zwp_relative_pointer_manager_v1"))?;
@@ -317,6 +335,7 @@ impl LayerShellInputCapture {
         let mut state = State {
             active_positions: Default::default(),
             pointer: None,
+            nudge_pointer,
             keyboard: None,
             global_list,
             globals: Globals {
@@ -508,6 +527,24 @@ impl State {
         if let Some(shortcut_inhibitor) = &self.shortcut_inhibitor {
             shortcut_inhibitor.destroy();
             self.shortcut_inhibitor = None;
+        }
+
+        // move the pointer off the barrier strip, otherwise the next time the
+        // strip is (re)created the pointer is already inside it and the
+        // capture fires again without anyone touching the mouse
+        if let Some(vp) = &self.nudge_pointer {
+            let (dx, dy) = match window.pos {
+                Position::Left => (UNGRAB_NUDGE, 0.0),
+                Position::Right => (-UNGRAB_NUDGE, 0.0),
+                Position::Top => (0.0, UNGRAB_NUDGE),
+                Position::Bottom => (0.0, -UNGRAB_NUDGE),
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u32;
+            vp.motion(now, dx, dy);
+            vp.frame();
         }
     }
 
@@ -1042,6 +1079,8 @@ delegate_noop!(State: wl_region::WlRegion);
 delegate_noop!(State: wl_shm_pool::WlShmPool);
 delegate_noop!(State: wl_compositor::WlCompositor);
 delegate_noop!(State: ZwlrLayerShellV1);
+delegate_noop!(State: ZwlrVirtualPointerManagerV1);
+delegate_noop!(State: ZwlrVirtualPointerV1);
 delegate_noop!(State: ZwpRelativePointerManagerV1);
 delegate_noop!(State: ZwpKeyboardShortcutsInhibitManagerV1);
 delegate_noop!(State: ZwpPointerConstraintsV1);

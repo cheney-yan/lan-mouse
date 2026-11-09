@@ -26,6 +26,8 @@ pub(crate) struct Capture {
 pub(crate) enum ICaptureEvent {
     /// a client was entered
     CaptureBegin(CaptureHandle),
+    /// the capture of this client ended (Leave sent, or no client was active)
+    CaptureReleased(Option<CaptureHandle>),
     /// capture disabled
     CaptureDisabled,
     /// capture disabled
@@ -526,6 +528,8 @@ impl CaptureTask {
     async fn release_capture(&mut self, capture: &mut InputCapture) -> Result<(), CaptureError> {
         self.ack_deadline = None;
         self.entered_at = None;
+        let released = self.active_client;
+        let _ = self.event_tx.send(ICaptureEvent::CaptureReleased(released));
         // If we have an active client, notify them we're leaving
         if let Some(handle) = self.active_client.take() {
             // Synthesize key-up events for every key still held in the
