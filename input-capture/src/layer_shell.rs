@@ -130,6 +130,10 @@ struct State {
     /// the compositor re-delivering focus for the pointer still sitting on the
     /// strip (before our nudge took effect), not the user crossing again
     last_ungrab: Option<std::time::Instant>,
+    /// the strip the pointer currently rests on (focus Enter without a grab,
+    /// or after a grab ended): it must be moved out of it when a remote
+    /// takes over, or the strip fires as soon as the pointer moves
+    hover: Option<Position>,
     keyboard: Option<WlKeyboard>,
     pointer_lock: Option<ZwpLockedPointerV1>,
     rel_pointer: Option<ZwpRelativePointerV1>,
@@ -341,6 +345,7 @@ impl LayerShellInputCapture {
             pointer: None,
             nudge_pointer,
             last_ungrab: None,
+            hover: None,
             keyboard: None,
             global_list,
             globals: Globals {
@@ -538,20 +543,26 @@ impl State {
         // move the pointer off the barrier strip, otherwise the next time the
         // strip is (re)created the pointer is already inside it and the
         // capture fires again without anyone touching the mouse
-        if let Some(vp) = &self.nudge_pointer {
-            let (dx, dy) = match window.pos {
-                Position::Left => (UNGRAB_NUDGE, 0.0),
-                Position::Right => (-UNGRAB_NUDGE, 0.0),
-                Position::Top => (0.0, UNGRAB_NUDGE),
-                Position::Bottom => (0.0, -UNGRAB_NUDGE),
-            };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u32;
-            vp.motion(now, dx, dy);
-            vp.frame();
-        }
+        let pos = window.pos;
+        self.nudge_off(pos);
+    }
+
+    /// push the real pointer a few pixels away from the strip at `pos`
+    fn nudge_off(&mut self, pos: Position) {
+        let Some(vp) = &self.nudge_pointer else { return };
+        let (dx, dy) = match pos {
+            Position::Left => (UNGRAB_NUDGE, 0.0),
+            Position::Right => (-UNGRAB_NUDGE, 0.0),
+            Position::Top => (0.0, UNGRAB_NUDGE),
+            Position::Bottom => (0.0, -UNGRAB_NUDGE),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u32;
+        vp.motion(now, dx, dy);
+        vp.frame();
+        self.hover = None;
     }
 
     fn add_client(&mut self, pos: Position) {
@@ -685,7 +696,17 @@ impl Capture for LayerShellInputCapture {
     async fn release(&mut self) -> Result<(), CaptureError> {
         log::debug!("releasing pointer");
         let inner = self.0.get_mut();
+        let grabbed = inner.state.focused.is_some();
         inner.state.ungrab();
+        if !grabbed {
+            // nothing was grabbed, but the pointer may be resting on a strip
+            // (e.g. parked on an edge when the remote took over): get it out
+            if let Some(pos) = inner.state.hover {
+                log::debug!("pointer resting on {pos} strip while released: nudging it off");
+                inner.state.nudge_off(pos);
+            }
+            inner.state.last_ungrab = Some(std::time::Instant::now());
+        }
         Ok(inner.flush_events()?)
     }
 
@@ -792,6 +813,7 @@ impl Dispatch<WlPointer, ()> for State {
                 surface_x,
                 surface_y,
             } => {
+                app.hover = app.active_windows.iter().find(|w| w.surface == surface).map(|w| w.pos);
                 if app
                     .last_ungrab
                     .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300))
@@ -833,6 +855,7 @@ impl Dispatch<WlPointer, ()> for State {
                  * it is impossible to grab it again (since the pointer
                  * lock, relative pointer,... objects are still in place)
                  */
+                app.hover = None;
                 if app.pointer_lock.is_some() {
                     log::warn!("compositor released mouse");
                 }
