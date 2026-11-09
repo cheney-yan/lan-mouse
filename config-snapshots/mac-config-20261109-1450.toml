@@ -1,0 +1,26 @@
+# Draft for ~/.config/lan-mouse/config.toml (Mac side). NOT applied yet.
+port = 4242
+release_bind = [
+    "KeyLeftCtrl",
+    "KeyLeftShift",
+    "KeyLeftMeta",
+    "KeyLeftAlt",
+]
+
+# imac sits in the empty area right of the Lenovo and below the Samsung.
+# Entry 1: entered from the Lenovo's right edge; imac's return edge is its LEFT edge.
+
+[[clients]]
+hostname = "imac"
+ips = ["192.168.5.120"]
+position = "right"
+activate_on_startup = true
+
+[[clients]]
+hostname = "imac"
+ips = ["192.168.5.120"]
+position = "bottom"
+activate_on_startup = true
+
+[authorized_fingerprints]
+"80:3f:e5:25:e8:75:f1:82:82:3f:0d:4a:80:2f:a6:60:00:19:f8:48:06:cc:d0:6c:ca:52:fa:2a:08:a3:2f:c5" = "imac"

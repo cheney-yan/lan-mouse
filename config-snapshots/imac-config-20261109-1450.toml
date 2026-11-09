@@ -1,0 +1,20 @@
+port = 4242
+
+[[clients]]
+hostname = "ms"
+ips = ["192.168.5.126", "192.168.5.40", "100.82.52.11"]
+position = "left"
+activate_on_startup = true
+
+
+[[clients]]
+hostname = "ms"
+ips = ["192.168.5.126", "192.168.5.40", "100.82.52.11"]
+position = "top"
+activate_on_startup = true
+
+[authorized_fingerprints]
+"23:1b:12:8c:a0:3c:3d:c6:2f:49:55:92:ed:91:9a:fb:05:22:71:52:80:a8:c9:65:e9:8a:3a:38:e0:47:93:98" = "ms"
+
+
+
