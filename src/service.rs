@@ -20,7 +20,7 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -75,6 +75,11 @@ pub struct Service {
     last_client_entered: Option<Instant>,
     /// the client we are currently sending input to, if any
     controlling: Option<ClientHandle>,
+    /// the client we most recently stopped sending to, and when: an Enter
+    /// from that host right after the release is still "the cursor coming
+    /// back" for the purpose of placing our cursor (the Leave and the Enter
+    /// it sends race, and the Leave often wins)
+    recently_controlled: Option<(ClientHandle, Instant)>,
     next_trigger_handle: u64,
 }
 
@@ -132,6 +137,7 @@ impl Service {
             incoming_conn_info: Default::default(),
             last_client_entered: None,
             controlling: None,
+            recently_controlled: None,
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
         };
@@ -293,19 +299,24 @@ impl Service {
                 fingerprint,
                 fraction,
             } => {
-                // A host we control entering us while we are sending to it is
-                // the cursor coming back. The same host entering us while we
-                // are NOT sending to it is an ordinary entry (two machines can
-                // be each other's clients) and must be treated like any other
-                // peer: never answer it with a Leave, or every crossing from
-                // that side bounces straight back.
-                let is_return = self.controlling.is_some() && self.controls_fingerprint(&fingerprint);
-                if is_return {
-                    if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
-                        self.capture.set_return_point(handle, f);
-                    }
-                } else if let Some(f) = fraction {
-                    self.emulation.enter_at(addr, pos, f);
+                // Is this the cursor coming back from a host we were sending
+                // to (now, or within the last second: its Leave and Enter
+                // race and the Leave usually arrives first)? Then place our
+                // cursor at the matching point. Otherwise it is an ordinary
+                // entry (two machines can be each other's clients): place the
+                // pointer for the newcomer. Either way nothing is sent back
+                // except the Ack: only the side holding the mouse ever sends
+                // a Leave, when it lets go.
+                let returning_client = self.client_at_named(pos, &fingerprint).filter(|&h| {
+                    self.controlling == Some(h)
+                        || self
+                            .recently_controlled
+                            .is_some_and(|(r, t)| r == h && t.elapsed() < Duration::from_secs(1))
+                });
+                match (returning_client, fraction) {
+                    (Some(handle), Some(f)) => self.capture.set_return_point(handle, f),
+                    (None, Some(f)) => self.emulation.enter_at(addr, pos, f),
+                    _ => {}
                 }
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {
@@ -317,11 +328,6 @@ impl Service {
                     });
                 } else {
                     self.update_incoming(addr, pos, fingerprint);
-                }
-                // the cursor came back from a host we were controlling: tell
-                // its capture to let go so its pointer is free again
-                if is_return {
-                    self.emulation.send_leave_event(addr);
                 }
             }
             EmulationEvent::Disconnected { addr } => {
@@ -399,7 +405,10 @@ impl Service {
                 self.capture_status = Status::Enabled;
                 self.notify_frontend(FrontendEvent::CaptureStatus(self.capture_status));
             }
-            ICaptureEvent::CaptureReleased(_) => {
+            ICaptureEvent::CaptureReleased(handle) => {
+                if let Some(h) = handle.or(self.controlling) {
+                    self.recently_controlled = Some((h, Instant::now()));
+                }
                 self.controlling = None;
             }
             ICaptureEvent::ClientEntered(handle) => {

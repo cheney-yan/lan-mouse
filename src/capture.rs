@@ -189,6 +189,12 @@ const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 /// wait for a DTLS handshake
 const WARM_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Where along the shared edge the cursor appears on the other device.
+/// `Some(0.5)`: always the middle of the edge, regardless of where the
+/// cursor crossed: predictable, and independent of the two screens' sizes
+/// ("go by direction, not by pixels"). `None`: the actual crossing point.
+const ENTRY_FRACTION: Option<f64> = Some(0.5);
+
 /// Ctrl+Alt+Meta+K while a client is captured: give the mouse back
 /// (the same chord is used by the HUD to *enter* a client when local)
 const TOGGLE_BIND: [scancode::Linux; 4] = [
@@ -492,7 +498,7 @@ impl CaptureTask {
         // connection on an unknown event, so it is only sent to peers that
         // announced support in their Pong; everyone else gets the legacy Enter.
         let capable = self.conn.supports_enter_at(handle);
-        let enter_event = |frac: Option<f64>| match frac {
+        let enter_event = |frac: Option<f64>| match ENTRY_FRACTION.or(frac) {
             Some(f) if capable => ProtoEvent::EnterAt(opposite_pos, f),
             _ => ProtoEvent::Enter(opposite_pos),
         };
