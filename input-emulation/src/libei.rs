@@ -257,6 +257,15 @@ impl Emulation for LibeiEmulation {
     async fn create(&mut self, _: EmulationHandle) {}
     async fn destroy(&mut self, _: EmulationHandle) {}
 
+    async fn enter_at(
+        &mut self,
+        _handle: EmulationHandle,
+        _edge: crate::Edge,
+        _fraction: f64,
+    ) -> Result<(), EmulationError> {
+        Ok(())
+    }
+
     async fn terminate(&mut self) {
         let _ = self.session.close().await;
         self.ei_task.abort();

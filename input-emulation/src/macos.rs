@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use bitflags::bitflags;
 use core_graphics::base::CGFloat;
 use core_graphics::display::{
-    CGDirectDisplayID, CGDisplayBounds, CGGetDisplaysWithRect, CGPoint, CGRect, CGSize,
+    CGDirectDisplayID, CGDisplay, CGDisplayBounds, CGGetDisplaysWithRect, CGPoint, CGRect, CGSize,
 };
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton, EventField,
@@ -250,6 +250,33 @@ fn get_display_bounds(display: CGDirectDisplayID) -> (CGFloat, CGFloat, CGFloat,
         let max_y = bounds.origin.y + bounds.size.height;
         (min_x as f64, min_y as f64, max_x as f64, max_y as f64)
     }
+}
+
+/// bounding box of all active displays: (min_x, min_y, max_x, max_y)
+fn all_displays_bounds() -> Option<(f64, f64, f64, f64)> {
+    let ids = CGDisplay::active_displays().ok()?;
+    let mut b: Option<(f64, f64, f64, f64)> = None;
+    for id in ids {
+        let (x0, y0, x1, y1) = get_display_bounds(id);
+        b = Some(match b {
+            None => (x0, y0, x1, y1),
+            Some((a, c, d, e)) => (a.min(x0), c.min(y0), d.max(x1), e.max(y1)),
+        });
+    }
+    b
+}
+
+/// nearest point on any display to (x, y)
+fn nearest_display_point(x: f64, y: f64) -> Option<(f64, f64)> {
+    let ids = CGDisplay::active_displays().ok()?;
+    ids.into_iter()
+        .map(|id| {
+            let (x0, y0, x1, y1) = get_display_bounds(id);
+            let (cx, cy) = (x.clamp(x0, x1 - 1.0), y.clamp(y0, y1 - 1.0));
+            ((cx - x).powi(2) + (cy - y).powi(2), (cx, cy))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, p)| p)
 }
 
 fn clamp_to_screen_space(
@@ -519,6 +546,42 @@ impl Emulation for MacOSEmulation {
     async fn create(&mut self, _handle: EmulationHandle) {}
 
     async fn destroy(&mut self, _handle: EmulationHandle) {}
+
+    async fn enter_at(
+        &mut self,
+        _handle: EmulationHandle,
+        edge: crate::Edge,
+        fraction: f64,
+    ) -> Result<(), EmulationError> {
+        let Some((xmin, ymin, xmax, ymax)) = all_displays_bounds() else {
+            return Ok(());
+        };
+        let (w, h) = (xmax - xmin, ymax - ymin);
+        let inset = (crate::ENTER_INSET * w.max(h)).max(2.0);
+        let (x, y) = match edge {
+            crate::Edge::Left => (xmin + inset, ymin + fraction * h),
+            crate::Edge::Right => (xmax - 1.0 - inset, ymin + fraction * h),
+            crate::Edge::Top => (xmin + fraction * w, ymin + inset),
+            crate::Edge::Bottom => (xmin + fraction * w, ymax - 1.0 - inset),
+        };
+        // land on an actual display: nearest point of the closest one
+        let (x, y) = match get_display_at_point(x, y) {
+            Some(_) => (x, y),
+            None => nearest_display_point(x, y).unwrap_or((x, y)),
+        };
+        let point = CGPoint::new(x, y);
+        log::debug!("enter_at {edge:?} @ {fraction:.3} -> ({x:.1},{y:.1})");
+        let _ = CGDisplay::warp_mouse_cursor_position(point);
+        if let Ok(event) = CGEvent::new_mouse_event(
+            self.event_source.clone(),
+            CGEventType::MouseMoved,
+            point,
+            CGMouseButton::Left,
+        ) {
+            event.post(CGEventTapLocation::HID);
+        }
+        Ok(())
+    }
 
     async fn terminate(&mut self) {}
 }

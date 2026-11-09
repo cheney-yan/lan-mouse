@@ -149,6 +149,8 @@ struct Window {
     surface: WlSurface,
     layer_surface: ZwlrLayerSurfaceV1,
     pos: Position,
+    /// size of the barrier strip (one of the two is 1)
+    size: (u32, u32),
 }
 
 impl Window {
@@ -208,6 +210,7 @@ impl Window {
             buffer,
             surface,
             layer_surface,
+            size: (width, height),
         }
     }
 }
@@ -632,6 +635,10 @@ impl Capture for LayerShellInputCapture {
         Err(CaptureError::EnterUnsupported)
     }
 
+    async fn set_return_point(&mut self, _pos: Position, _fraction: f64) -> Result<(), CaptureError> {
+        Ok(())
+    }
+
     async fn release(&mut self) -> Result<(), CaptureError> {
         log::debug!("releasing pointer");
         let inner = self.0.get_mut();
@@ -739,8 +746,8 @@ impl Dispatch<WlPointer, ()> for State {
             wl_pointer::Event::Enter {
                 serial,
                 surface,
-                surface_x: _,
-                surface_y: _,
+                surface_x,
+                surface_y,
             } => {
                 // get client corresponding to the focused surface
                 {
@@ -751,12 +758,21 @@ impl Dispatch<WlPointer, ()> for State {
                         return;
                     }
                 }
-                let pos = app
+                let window = app
                     .active_windows
                     .iter()
                     .find(|w| w.surface == surface)
-                    .map(|w| w.pos)
                     .unwrap();
+                let pos = window.pos;
+                // where along the strip the pointer entered: the strip spans
+                // the whole edge of the output, so this is the edge fraction
+                let (w, h) = window.size;
+                let frac = match pos {
+                    Position::Left | Position::Right => surface_y / h.max(1) as f64,
+                    Position::Top | Position::Bottom => surface_x / w.max(1) as f64,
+                };
+                app.pending_events
+                    .push_back((pos, CaptureEvent::EdgeFraction(frac.clamp(0.0, 1.0))));
                 app.pending_events.push_back((pos, CaptureEvent::Begin));
             }
             wl_pointer::Event::Leave { .. } => {

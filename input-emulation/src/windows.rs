@@ -79,6 +79,15 @@ impl Emulation for WindowsEmulation {
 
     async fn destroy(&mut self, _handle: EmulationHandle) {}
 
+    async fn enter_at(
+        &mut self,
+        _handle: EmulationHandle,
+        _edge: crate::Edge,
+        _fraction: f64,
+    ) -> Result<(), EmulationError> {
+        Ok(())
+    }
+
     async fn terminate(&mut self) {}
 }
 

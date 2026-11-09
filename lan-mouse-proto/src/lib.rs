@@ -48,6 +48,10 @@ impl Display for Position {
 /// main lan-mouse protocol event type
 #[derive(Clone, Copy, Debug)]
 pub enum ProtoEvent {
+    /// like [`ProtoEvent::Enter`] but also tells where along the shared
+    /// edge the cursor crossed: 0.0 = top / left end, 1.0 = bottom / right
+    /// end of the *receiving* device's edge
+    EnterAt(Position, f64),
     /// notify a client that the cursor entered its region at the given position
     /// [`ProtoEvent::Ack`] with the same serial is used for synchronization between devices
     Enter(Position),
@@ -69,6 +73,7 @@ impl Display for ProtoEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ProtoEvent::Enter(s) => write!(f, "Enter({s})"),
+            ProtoEvent::EnterAt(s, frac) => write!(f, "EnterAt({s}, {frac:.3})"),
             ProtoEvent::Leave(s) => write!(f, "Leave({s})"),
             ProtoEvent::Ack(s) => write!(f, "Ack({s})"),
             ProtoEvent::Input(e) => write!(f, "{e}"),
@@ -98,6 +103,7 @@ pub enum EventType {
     Enter,
     Leave,
     Ack,
+    EnterAt,
 }
 
 impl ProtoEvent {
@@ -118,6 +124,7 @@ impl ProtoEvent {
             ProtoEvent::Ping => EventType::Ping,
             ProtoEvent::Pong(_) => EventType::Pong,
             ProtoEvent::Enter(_) => EventType::Enter,
+            ProtoEvent::EnterAt(..) => EventType::EnterAt,
             ProtoEvent::Leave(_) => EventType::Leave,
             ProtoEvent::Ack(_) => EventType::Ack,
         }
@@ -172,6 +179,11 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
             EventType::Ping => Ok(Self::Ping),
             EventType::Pong => Ok(Self::Pong(decode_u8(&mut buf)? != 0)),
             EventType::Enter => Ok(Self::Enter(decode_u8(&mut buf)?.try_into()?)),
+            EventType::EnterAt => {
+                let pos = decode_u8(&mut buf)?.try_into()?;
+                let frac = decode_f64(&mut buf)?;
+                Ok(Self::EnterAt(pos, frac))
+            }
             EventType::Leave => Ok(Self::Leave(decode_u32(&mut buf)?)),
             EventType::Ack => Ok(Self::Ack(decode_u32(&mut buf)?)),
         }
@@ -236,6 +248,10 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                 ProtoEvent::Ping => {}
                 ProtoEvent::Pong(alive) => encode_u8(buf, len, alive as u8),
                 ProtoEvent::Enter(pos) => encode_u8(buf, len, pos as u8),
+                ProtoEvent::EnterAt(pos, frac) => {
+                    encode_u8(buf, len, pos as u8);
+                    encode_f64(buf, len, frac);
+                }
                 ProtoEvent::Leave(serial) => encode_u32(buf, len, serial),
                 ProtoEvent::Ack(serial) => encode_u32(buf, len, serial),
             }
@@ -280,3 +296,37 @@ encode_impl!(u8);
 encode_impl!(u32);
 encode_impl!(i32);
 encode_impl!(f64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(e: ProtoEvent) -> ProtoEvent {
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = e.into();
+        assert!(len <= MAX_EVENT_SIZE);
+        ProtoEvent::try_from(buf).expect("decode")
+    }
+
+    #[test]
+    fn enter_at_roundtrip() {
+        match roundtrip(ProtoEvent::EnterAt(Position::Top, 0.375)) {
+            ProtoEvent::EnterAt(Position::Top, f) => assert_eq!(f, 0.375),
+            other => panic!("unexpected {other}"),
+        }
+        match roundtrip(ProtoEvent::EnterAt(Position::Left, 1.0)) {
+            ProtoEvent::EnterAt(Position::Left, f) => assert_eq!(f, 1.0),
+            other => panic!("unexpected {other}"),
+        }
+    }
+
+    #[test]
+    fn legacy_enter_still_decodes() {
+        match roundtrip(ProtoEvent::Enter(Position::Bottom)) {
+            ProtoEvent::Enter(Position::Bottom) => {}
+            other => panic!("unexpected {other}"),
+        }
+        // the new event id must come after every legacy id so old peers
+        // reject it as unknown instead of misreading it
+        assert_eq!(EventType::EnterAt as u8, EventType::Ack as u8 + 1);
+    }
+}

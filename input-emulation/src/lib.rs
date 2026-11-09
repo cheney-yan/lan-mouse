@@ -69,6 +69,19 @@ impl Display for Backend {
     }
 }
 
+/// the side of this device's screen a remote cursor enters through
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// how far inside the edge (as a fraction of the screen) the cursor is
+/// placed on entry, so it does not sit on the edge's own barrier
+pub const ENTER_INSET: f64 = 0.003;
+
 pub struct InputEmulation {
     emulation: Box<dyn Emulation>,
     handles: HashSet<EmulationHandle>,
@@ -151,6 +164,17 @@ impl InputEmulation {
             }
             _ => self.emulation.consume(event, handle).await,
         }
+    }
+
+    /// a remote cursor entered through `edge` at `fraction` (0.0 = top/left
+    /// end, 1.0 = bottom/right end): place the pointer there if the backend can
+    pub async fn enter_at(
+        &mut self,
+        handle: EmulationHandle,
+        edge: Edge,
+        fraction: f64,
+    ) -> Result<(), EmulationError> {
+        self.emulation.enter_at(handle, edge, fraction.clamp(0.0, 1.0)).await
     }
 
     pub async fn create(&mut self, handle: EmulationHandle) -> bool {
@@ -237,4 +261,11 @@ trait Emulation: Send {
     async fn create(&mut self, handle: EmulationHandle);
     async fn destroy(&mut self, handle: EmulationHandle);
     async fn terminate(&mut self);
+    /// place the pointer where a remote cursor entered (optional)
+    async fn enter_at(
+        &mut self,
+        handle: EmulationHandle,
+        edge: Edge,
+        fraction: f64,
+    ) -> Result<(), EmulationError>;
 }

@@ -55,6 +55,8 @@ enum CaptureRequest {
     Release,
     /// enter a client programmatically
     Enter(CaptureHandle),
+    /// the cursor returns from this client through `fraction` of its edge
+    SetReturnPoint(CaptureHandle, f64),
     /// add a capture client
     Create(CaptureHandle, Position, CaptureType),
     /// destory a capture client
@@ -78,6 +80,9 @@ impl Capture {
             ack_deadline: None,
             entered_at: None,
             locate_sent: false,
+            pending_fraction: None,
+            enter_fraction: None,
+            enter_resends: 0,
             active_client: None,
             backend,
             cancellation_token: cancellation_token.clone(),
@@ -138,6 +143,12 @@ impl Capture {
     pub(crate) fn enter(&self, handle: CaptureHandle) {
         self.request_tx
             .send(CaptureRequest::Enter(handle))
+            .expect("channel closed");
+    }
+
+    pub(crate) fn set_return_point(&self, handle: CaptureHandle, fraction: f64) {
+        self.request_tx
+            .send(CaptureRequest::SetReturnPoint(handle, fraction))
             .expect("channel closed");
     }
 
@@ -220,6 +231,12 @@ struct CaptureTask {
     entered_at: Option<Instant>,
     /// locate chord already reported for the current key-down
     locate_sent: bool,
+    /// edge fraction announced by the backend for the next `Begin`
+    pending_fraction: Option<f64>,
+    /// edge fraction of the active client's entry (None = backend did not say)
+    enter_fraction: Option<f64>,
+    /// how many `Enter`s were (re)sent while waiting for the Ack
+    enter_resends: u32,
     active_client: Option<CaptureHandle>,
     backend: Option<input_capture::Backend>,
     cancellation_token: CancellationToken,
@@ -273,7 +290,7 @@ impl CaptureTask {
                         CaptureRequest::Reenable => break,
                         CaptureRequest::Create(h, p, t) => self.add_capture(h, p, t),
                         CaptureRequest::Destroy(h) => self.remove_capture(h),
-                        CaptureRequest::Release | CaptureRequest::Enter(_) => { /* nothing to do */ }
+                        CaptureRequest::Release | CaptureRequest::Enter(_) | CaptureRequest::SetReturnPoint(..) => { /* nothing to do */ }
                         CaptureRequest::SetReleaseBind(bind) => {
                             self.release_bind.borrow_mut().clone_from(&bind);
                         }
@@ -391,6 +408,11 @@ impl CaptureTask {
                             log::warn!("could not enter client {h}: {e}");
                         }
                     }
+                    CaptureRequest::SetReturnPoint(h, f) => {
+                        if let Err(e) = capture.set_return_point(h, f).await {
+                            log::warn!("could not set return point for client {h}: {e}");
+                        }
+                    }
                     CaptureRequest::Create(h, p, t) => {
                         self.add_capture(h, p, t);
                         capture.create(h, p).await?;
@@ -416,6 +438,11 @@ impl CaptureTask {
     ) -> Result<(), CaptureError> {
         let (handle, event) = event;
         log::trace!("({handle}): {event:?}");
+
+        if let CaptureEvent::EdgeFraction(f) = event {
+            self.pending_fraction = Some(f);
+            return Ok(());
+        }
 
         if capture.keys_pressed(&self.release_bind.borrow()) {
             log::info!("releasing capture: release-bind pressed");
@@ -457,6 +484,8 @@ impl CaptureTask {
             self.state = State::WaitingForAck;
             self.ack_deadline = Some(tokio::time::Instant::now() + ACK_TIMEOUT);
             self.entered_at = Some(Instant::now());
+            self.enter_fraction = self.pending_fraction.take();
+            self.enter_resends = 0;
             self.active_client.replace(handle);
             self.event_tx
                 .send(ICaptureEvent::ClientEntered(handle))
@@ -465,11 +494,22 @@ impl CaptureTask {
 
         let opposite_pos = to_proto_pos(self.get_pos(handle).opposite());
 
+        // EnterAt carries the crossing point; peers running the upstream
+        // protocol ignore it, so every third repeat falls back to the legacy
+        // Enter until the peer acknowledges
+        let enter_event = |resends: u32, frac: Option<f64>| match frac {
+            Some(f) if resends % 3 != 2 => ProtoEvent::EnterAt(opposite_pos, f),
+            _ => ProtoEvent::Enter(opposite_pos),
+        };
         let event = match event {
-            CaptureEvent::Begin => ProtoEvent::Enter(opposite_pos),
+            CaptureEvent::EdgeFraction(_) => unreachable!("handled above"),
+            CaptureEvent::Begin => enter_event(0, self.enter_fraction),
             CaptureEvent::Input(e) => match self.state {
                 // connection not acknowledged, repeat `Enter` event
-                State::WaitingForAck => ProtoEvent::Enter(opposite_pos),
+                State::WaitingForAck => {
+                    self.enter_resends = self.enter_resends.wrapping_add(1);
+                    enter_event(self.enter_resends, self.enter_fraction)
+                }
                 State::Sending => ProtoEvent::Input(e),
             },
         };

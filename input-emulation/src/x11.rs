@@ -148,6 +148,15 @@ impl Emulation for X11Emulation {
         // for our purposes it does not matter what client sent the event
     }
 
+    async fn enter_at(
+        &mut self,
+        _handle: EmulationHandle,
+        _edge: crate::Edge,
+        _fraction: f64,
+    ) -> Result<(), EmulationError> {
+        Ok(())
+    }
+
     async fn terminate(&mut self) {
         /* nothing to do */
     }

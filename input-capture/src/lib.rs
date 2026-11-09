@@ -35,8 +35,14 @@ mod dummy;
 
 pub type CaptureHandle = u64;
 
+pub mod geometry;
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum CaptureEvent {
+    /// where along the remote's edge the cursor is about to cross
+    /// (0.0 .. 1.0); sent right before [`CaptureEvent::Begin`] by backends
+    /// that know it
+    EdgeFraction(f64),
     /// capture on this capture handle is now active
     Begin,
     /// input event coming from capture handle
@@ -46,6 +52,7 @@ pub enum CaptureEvent {
 impl Display for CaptureEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CaptureEvent::EdgeFraction(frac) => write!(f, "edge fraction {frac:.3}"),
             CaptureEvent::Begin => write!(f, "begin capture"),
             CaptureEvent::Input(e) => write!(f, "{e}"),
         }
@@ -177,6 +184,12 @@ impl InputCapture {
         self.capture.enter(pos).await
     }
 
+    /// the cursor returns from client `id` through `fraction` of its edge
+    pub async fn set_return_point(&mut self, id: CaptureHandle, fraction: f64) -> Result<(), CaptureError> {
+        let pos = *self.id_map.get(&id).ok_or(CaptureError::NoSuchHandle)?;
+        self.capture.set_return_point(pos, fraction).await
+    }
+
     /// Drain and return every key the capture has forwarded as
     /// down-but-not-up. The caller is expected to synthesize key-up
     /// events to the remote peer for each — otherwise the peer
@@ -296,6 +309,11 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
     /// start capturing for the client at `pos` as if the cursor had
     /// crossed its barrier (backends may return `EnterUnsupported`)
     async fn enter(&mut self, pos: Position) -> Result<(), CaptureError>;
+
+    /// the cursor is coming back from the client at `pos` through
+    /// `fraction` of that client's edge: place the (still hidden) cursor
+    /// there so it reappears at the matching spot on release
+    async fn set_return_point(&mut self, pos: Position, fraction: f64) -> Result<(), CaptureError>;
 
     /// destroy the input capture
     async fn terminate(&mut self) -> Result<(), CaptureError>;

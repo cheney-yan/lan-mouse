@@ -153,6 +153,15 @@ impl Emulation for DesktopPortalEmulation {
 
     async fn create(&mut self, _client: EmulationHandle) {}
     async fn destroy(&mut self, _client: EmulationHandle) {}
+    async fn enter_at(
+        &mut self,
+        _handle: EmulationHandle,
+        _edge: crate::Edge,
+        _fraction: f64,
+    ) -> Result<(), EmulationError> {
+        Ok(())
+    }
+
     async fn terminate(&mut self) {
         if let Err(e) = self.session.close().await {
             log::warn!("session.close(): {e}");

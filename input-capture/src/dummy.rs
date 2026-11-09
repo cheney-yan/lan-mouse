@@ -14,6 +14,8 @@ pub struct DummyInputCapture {
     start: Option<Instant>,
     interval: Interval,
     offset: (i32, i32),
+    /// the dummy announces a fixed edge fraction right before `Begin`
+    fraction_sent: bool,
 }
 
 impl DummyInputCapture {
@@ -22,6 +24,7 @@ impl DummyInputCapture {
             start: None,
             interval: time::interval(Duration::from_millis(1)),
             offset: (0, 0),
+            fraction_sent: false,
         }
     }
 }
@@ -46,6 +49,10 @@ impl Capture for DummyInputCapture {
         Err(CaptureError::EnterUnsupported)
     }
 
+    async fn set_return_point(&mut self, _pos: Position, _fraction: f64) -> Result<(), CaptureError> {
+        Ok(())
+    }
+
     async fn release(&mut self) -> Result<(), CaptureError> {
         Ok(())
     }
@@ -55,6 +62,9 @@ impl Capture for DummyInputCapture {
     }
 }
 
+/// edge fraction the dummy capture reports (used by the loopback test)
+pub const DUMMY_FRACTION: f64 = 0.25;
+
 const FREQUENCY_HZ: f64 = 1.0;
 const RADIUS: f64 = 100.0;
 
@@ -63,6 +73,10 @@ impl Stream for DummyInputCapture {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let current = ready!(self.interval.poll_tick(cx));
+        if !self.fraction_sent {
+            self.fraction_sent = true;
+            return Poll::Ready(Some(Ok((Position::Left, CaptureEvent::EdgeFraction(DUMMY_FRACTION)))));
+        }
         let event = match self.start {
             None => {
                 self.start.replace(current);

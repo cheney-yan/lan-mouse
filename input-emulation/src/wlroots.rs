@@ -159,6 +159,26 @@ impl Emulation for WlrootsEmulation {
         Ok(())
     }
 
+    async fn enter_at(
+        &mut self,
+        handle: EmulationHandle,
+        edge: crate::Edge,
+        fraction: f64,
+    ) -> Result<(), EmulationError> {
+        if let Some(virtual_input) = self.state.input_for_client.get(&handle) {
+            virtual_input.enter_at(edge, fraction);
+            match self.queue.flush() {
+                Err(WaylandError::Protocol(e)) => panic!("wayland protocol violation: {e}"),
+                Err(WaylandError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.last_flush_failed = true;
+                }
+                Ok(()) => self.last_flush_failed = false,
+                Err(e) => Err(e)?,
+            }
+        }
+        Ok(())
+    }
+
     async fn create(&mut self, handle: EmulationHandle) {
         self.state.add_client(handle);
         if let Err(e) = self.queue.flush() {
@@ -183,6 +203,28 @@ struct VirtualInput {
 }
 
 impl VirtualInput {
+    /// warp the pointer to `fraction` along `edge`, slightly inside the screen.
+    /// The virtual pointer was created without an output, so the extents map
+    /// onto the whole output layout; with the usual single output that is the
+    /// screen itself.
+    fn enter_at(&self, edge: crate::Edge, fraction: f64) {
+        const EXTENT: u32 = 65535;
+        let now: u32 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u32;
+        let along = (fraction.clamp(0.0, 1.0) * EXTENT as f64) as u32;
+        let inset = (crate::ENTER_INSET * EXTENT as f64) as u32;
+        let (x, y) = match edge {
+            crate::Edge::Left => (inset, along),
+            crate::Edge::Right => (EXTENT - inset, along),
+            crate::Edge::Top => (along, inset),
+            crate::Edge::Bottom => (along, EXTENT - inset),
+        };
+        self.pointer.motion_absolute(now, x, y, EXTENT, EXTENT);
+        self.pointer.frame();
+    }
+
     fn consume_event(&self, event: Event) -> Result<(), ()> {
         let now: u32 = SystemTime::now()
             .duration_since(UNIX_EPOCH)

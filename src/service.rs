@@ -292,8 +292,16 @@ impl Service {
                 addr,
                 pos,
                 fingerprint,
+                fraction,
             } => {
                 let is_return = self.controls_fingerprint(&fingerprint);
+                if is_return {
+                    // the cursor comes back through `fraction` of the edge of
+                    // our client sitting at `pos`: put it at the matching spot
+                    if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
+                        self.capture.set_return_point(handle, f);
+                    }
+                }
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {
                     self.add_incoming(addr, pos, fingerprint.clone());
@@ -349,6 +357,21 @@ impl Service {
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
             }
         }
+    }
+
+    /// our active client at `pos` whose hostname matches the authorized name of `fingerprint`
+    fn client_at_named(&self, pos: Position, fingerprint: &str) -> Option<ClientHandle> {
+        let name = self.authorized_keys.read().expect("lock").get(fingerprint).cloned()?;
+        self.client_manager
+            .active_clients()
+            .into_iter()
+            .find(|&h| {
+                self.client_manager.get_pos(h) == Some(pos)
+                    && self
+                        .client_manager
+                        .get_hostname(h)
+                        .is_some_and(|n| n.eq_ignore_ascii_case(&name))
+            })
     }
 
     /// whether the given fingerprint belongs to a host configured as one of our clients

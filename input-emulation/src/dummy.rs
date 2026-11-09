@@ -26,6 +26,15 @@ impl Emulation for DummyEmulation {
     }
     async fn create(&mut self, _: EmulationHandle) {}
     async fn destroy(&mut self, _: EmulationHandle) {}
+    async fn enter_at(
+        &mut self,
+        client_handle: EmulationHandle,
+        edge: crate::Edge,
+        fraction: f64,
+    ) -> Result<(), EmulationError> {
+        log::info!("enter_at: ({client_handle}) edge={edge:?} fraction={fraction:.3}");
+        Ok(())
+    }
     async fn terminate(&mut self) {
         /* nothing to do */
     }

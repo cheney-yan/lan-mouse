@@ -1,4 +1,8 @@
-use super::{Capture, CaptureError, CaptureEvent, Position, error::MacosCaptureCreationError};
+use super::{
+    Capture, CaptureError, CaptureEvent, Position,
+    error::MacosCaptureCreationError,
+    geometry::{Rect, edge_fraction, return_point},
+};
 use async_trait::async_trait;
 use bitflags::bitflags;
 use core_foundation::{
@@ -62,6 +66,10 @@ struct Region {
 }
 
 impl Region {
+    fn rect(&self) -> Rect {
+        Rect { x: self.x, y: self.y, w: self.w, h: self.h }
+    }
+
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -162,6 +170,7 @@ struct InputCaptureState {
 enum ProducerEvent {
     Release,
     Enter(Position),
+    ReturnPoint(Position, f64),
     Create(Position),
     Destroy(Position),
     Grab(Position),
@@ -260,6 +269,35 @@ impl InputCaptureState {
         Ok(())
     }
 
+    /// the rectangle the remote at `pos` is assumed to occupy, in global
+    /// coordinates: the configured region, or else the whole side of the
+    /// bounding box of all displays
+    fn remote_rect(&self, pos: Position) -> Rect {
+        if let Some(r) = self.regions.get(&pos) {
+            return r.rect();
+        }
+        let b = &self.bounds;
+        let (w, h) = (b.xmax - b.xmin, b.ymax - b.ymin);
+        match pos {
+            Position::Right => Rect { x: b.xmax, y: b.ymin, w, h },
+            Position::Left => Rect { x: b.xmin - w, y: b.ymin, w, h },
+            Position::Bottom => Rect { x: b.xmin, y: b.ymax, w, h },
+            Position::Top => Rect { x: b.xmin, y: b.ymin - h, w, h },
+        }
+    }
+
+    fn display_rects(&self) -> Vec<Rect> {
+        self.displays
+            .iter()
+            .map(|d| Rect { x: d.origin.x, y: d.origin.y, w: d.size.width, h: d.size.height })
+            .collect()
+    }
+
+    /// where along the remote's edge the given local point is
+    fn fraction_at(&self, pos: Position, point: CGPoint) -> f64 {
+        edge_fraction(pos, &self.remote_rect(pos), point.x, point.y)
+    }
+
     /// whether the given point lies on any active display
     fn on_any_display(&self, x: f64, y: f64) -> bool {
         self.displays.iter().any(|d| {
@@ -315,6 +353,13 @@ impl InputCaptureState {
                     self.current_pos = None;
                     self.hud.notify("leave", Some(pos), self.enter_position);
                 }
+            }
+            ProducerEvent::ReturnPoint(pos, fraction) => {
+                let (x, y) = return_point(pos, &self.remote_rect(pos), fraction, 1.0, &self.display_rects());
+                let point = CGPoint::new(x, y);
+                log::debug!("return point for {pos:?} @ {fraction:.3}: ({x:.1},{y:.1})");
+                self.enter_position = Some(point);
+                CGDisplay::warp_mouse_cursor_position(point).map_err(CaptureError::WarpCursor)?;
             }
             ProducerEvent::Enter(pos) => {
                 if self.current_pos.is_none() && self.active_clients.contains(&pos) {
@@ -695,6 +740,8 @@ fn create_event_tap<'a>(
                     .start_capture(cg_ev, new_pos)
                     .unwrap_or_else(|e| log::warn!("{e}"));
                 state.hud.notify("enter", Some(new_pos), state.enter_position);
+                let frac = state.fraction_at(new_pos, state.enter_position.unwrap_or(cg_ev.location()));
+                res_events.push(CaptureEvent::EdgeFraction(frac));
                 res_events.push(CaptureEvent::Begin);
                 notify_tx
                     .blocking_send(ProducerEvent::Grab(new_pos))
@@ -876,8 +923,10 @@ impl MacOSInputCapture {
                         });
                         // programmatic enter succeeded => emit Begin like a barrier crossing
                         let begin = entering.filter(|p| state.current_pos == Some(*p));
+                        let frac = begin.map(|p| state.fraction_at(p, state.enter_position.unwrap_or(CGPoint::new(0.0, 0.0))));
                         drop(state);
-                        if let Some(p) = begin {
+                        if let (Some(p), Some(frac)) = (begin, frac) {
+                            let _ = begin_tx.send((p, CaptureEvent::EdgeFraction(frac))).await;
                             let _ = begin_tx.send((p, CaptureEvent::Begin)).await;
                         }
                     }
@@ -970,6 +1019,14 @@ impl Capture for MacOSInputCapture {
         tokio::task::spawn_local(async move {
             log::debug!("notifying Enter {pos:?}");
             let _ = notify_tx.send(ProducerEvent::Enter(pos)).await;
+        });
+        Ok(())
+    }
+
+    async fn set_return_point(&mut self, pos: Position, fraction: f64) -> Result<(), CaptureError> {
+        let notify_tx = self.notify_tx.clone();
+        tokio::task::spawn_local(async move {
+            let _ = notify_tx.send(ProducerEvent::ReturnPoint(pos, fraction)).await;
         });
         Ok(())
     }
