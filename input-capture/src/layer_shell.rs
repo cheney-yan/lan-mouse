@@ -118,7 +118,13 @@ struct OutputInfo {
 
 /// how far (px) the pointer is pushed back inside the screen when a capture
 /// ends, so it does not stay parked on the barrier strip and re-trigger it
-const UNGRAB_NUDGE: f64 = 8.0;
+const UNGRAB_NUDGE: f64 = 12.0;
+
+/// thickness of the barrier strip along the screen edge, in logical px
+const STRIP_THICKNESS: u32 = 4;
+
+/// re-enter debounce after an ungrab
+const REENTER_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 struct State {
     active_positions: HashSet<Position>,
@@ -183,9 +189,11 @@ impl Window {
         log::debug!("creating window output: {output:?}, size: {size:?}");
         let g = &state.globals;
 
+        // STRIP_THICKNESS px thick: a 1 px target made the edge feel sticky
+        // (the pointer had to reach the very last pixel)
         let (width, height) = match pos {
-            Position::Left | Position::Right => (1, size.1 as u32),
-            Position::Top | Position::Bottom => (size.0 as u32, 1),
+            Position::Left | Position::Right => (STRIP_THICKNESS, size.1 as u32),
+            Position::Top | Position::Bottom => (size.0 as u32, STRIP_THICKNESS),
         };
         let mut file = tempfile::tempfile().unwrap();
         draw(&mut file, (width, height));
@@ -816,7 +824,7 @@ impl Dispatch<WlPointer, ()> for State {
                 app.hover = app.active_windows.iter().find(|w| w.surface == surface).map(|w| w.pos);
                 if app
                     .last_ungrab
-                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300))
+                    .is_some_and(|t| t.elapsed() < REENTER_DEBOUNCE)
                 {
                     log::debug!("ignoring strip enter {:?} after ungrab", app.last_ungrab.map(|t| t.elapsed()));
                     return;
