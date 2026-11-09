@@ -159,7 +159,7 @@ impl ListenTask {
                                 self.listener.reply(addr, ProtoEvent::Ack(0)).await;
                             }
                             ProtoEvent::Input(event) => self.emulation_proxy.consume(event, addr),
-                            ProtoEvent::Ping => self.listener.reply(addr, ProtoEvent::Pong(self.emulation_proxy.emulation_active.get())).await,
+                            ProtoEvent::Ping => self.listener.reply(addr, ProtoEvent::Pong(self.emulation_proxy.emulation_active.get(), true)).await,
                             _ => {}
                         }
                     }

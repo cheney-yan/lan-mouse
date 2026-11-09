@@ -10,6 +10,11 @@ use thiserror::Error;
 /// defines the maximum size an encoded event can take up
 /// this is currently the pointer motion event
 /// type: u8, time: u32, dx: f64, dy: f64
+/// Pong payload bits
+pub const PONG_ALIVE: u8 = 0x01;
+/// the peer understands [`ProtoEvent::EnterAt`]
+pub const PONG_ENTER_AT: u8 = 0x02;
+
 pub const MAX_EVENT_SIZE: usize = size_of::<u8>() + size_of::<u32>() + 2 * size_of::<f64>();
 
 /// error type for protocol violations
@@ -66,7 +71,8 @@ pub enum ProtoEvent {
     /// A client has to respond with [`ProtoEvent::Pong`].
     Ping,
     /// Response to [`ProtoEvent::Ping`], true if emulation is enabled / available
-    Pong(bool),
+    /// (emulation alive, peer understands EnterAt)
+    Pong(bool, bool),
 }
 
 impl Display for ProtoEvent {
@@ -78,7 +84,7 @@ impl Display for ProtoEvent {
             ProtoEvent::Ack(s) => write!(f, "Ack({s})"),
             ProtoEvent::Input(e) => write!(f, "{e}"),
             ProtoEvent::Ping => write!(f, "ping"),
-            ProtoEvent::Pong(alive) => {
+            ProtoEvent::Pong(alive, _) => {
                 write!(
                     f,
                     "pong: {}",
@@ -122,7 +128,7 @@ impl ProtoEvent {
                 },
             },
             ProtoEvent::Ping => EventType::Ping,
-            ProtoEvent::Pong(_) => EventType::Pong,
+            ProtoEvent::Pong(..) => EventType::Pong,
             ProtoEvent::Enter(_) => EventType::Enter,
             ProtoEvent::EnterAt(..) => EventType::EnterAt,
             ProtoEvent::Leave(_) => EventType::Leave,
@@ -177,7 +183,10 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
                 },
             ))),
             EventType::Ping => Ok(Self::Ping),
-            EventType::Pong => Ok(Self::Pong(decode_u8(&mut buf)? != 0)),
+            EventType::Pong => {
+                let b = decode_u8(&mut buf)?;
+                Ok(Self::Pong(b & PONG_ALIVE != 0, b & PONG_ENTER_AT != 0))
+            }
             EventType::Enter => Ok(Self::Enter(decode_u8(&mut buf)?.try_into()?)),
             EventType::EnterAt => {
                 let pos = decode_u8(&mut buf)?.try_into()?;
@@ -246,7 +255,12 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                     },
                 },
                 ProtoEvent::Ping => {}
-                ProtoEvent::Pong(alive) => encode_u8(buf, len, alive as u8),
+                ProtoEvent::Pong(alive, enter_at) => {
+                    // legacy peers read the whole byte as "alive", so the
+                    // capability bit is only set together with the alive bit
+                    let b = if alive { PONG_ALIVE | if enter_at { PONG_ENTER_AT } else { 0 } } else { 0 };
+                    encode_u8(buf, len, b)
+                }
                 ProtoEvent::Enter(pos) => encode_u8(buf, len, pos as u8),
                 ProtoEvent::EnterAt(pos, frac) => {
                     encode_u8(buf, len, pos as u8);
@@ -328,5 +342,25 @@ mod tests {
         // the new event id must come after every legacy id so old peers
         // reject it as unknown instead of misreading it
         assert_eq!(EventType::EnterAt as u8, EventType::Ack as u8 + 1);
+    }
+}
+
+#[cfg(test)]
+mod pong_tests {
+    use super::*;
+    #[test]
+    fn pong_bits() {
+        for (alive, cap) in [(true, true), (true, false), (false, true), (false, false)] {
+            let (buf, _): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::Pong(alive, cap).into();
+            match ProtoEvent::try_from(buf).unwrap() {
+                ProtoEvent::Pong(a, c) => {
+                    assert_eq!(a, alive);
+                    assert_eq!(c, alive && cap, "capability only travels with alive");
+                }
+                other => panic!("{other}"),
+            }
+            // a legacy decoder reads the byte as a plain bool: must equal `alive`
+            assert_eq!(buf[1] != 0, alive);
+        }
     }
 }

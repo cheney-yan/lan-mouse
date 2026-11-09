@@ -101,9 +101,16 @@ pub(crate) struct LanMouseConnection {
     recv_rx: Receiver<(ClientHandle, ProtoEvent)>,
     recv_tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
+    /// clients whose last Pong announced EnterAt support
+    enter_at_capable: Rc<RefCell<HashSet<ClientHandle>>>,
 }
 
 impl LanMouseConnection {
+    /// whether the client announced (in its last Pong) that it understands `EnterAt`
+    pub(crate) fn supports_enter_at(&self, handle: ClientHandle) -> bool {
+        self.enter_at_capable.borrow().contains(&handle)
+    }
+
     pub(crate) fn new(cert: Certificate, client_manager: ClientManager) -> Self {
         let (recv_tx, recv_rx) = channel();
         Self {
@@ -114,6 +121,7 @@ impl LanMouseConnection {
             recv_rx,
             recv_tx,
             ping_response: Default::default(),
+            enter_at_capable: Default::default(),
         }
     }
 
@@ -162,6 +170,7 @@ impl LanMouseConnection {
                 self.connecting.clone(),
                 self.recv_tx.clone(),
                 self.ping_response.clone(),
+                self.enter_at_capable.clone(),
             ));
         }
         Err(LanMouseConnectionError::NotConnected)
@@ -176,6 +185,7 @@ async fn connect_to_handle(
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
+    enter_at_capable: Rc<RefCell<HashSet<ClientHandle>>>,
 ) -> Result<(), LanMouseConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
@@ -211,6 +221,7 @@ async fn connect_to_handle(
             conns,
             tx,
             ping_response.clone(),
+            enter_at_capable,
         ));
         return Ok(());
     }
@@ -255,16 +266,22 @@ async fn receive_loop(
     conns: Rc<Mutex<HashMap<ClientHandle, Arc<dyn Conn + Send + Sync>>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<ClientHandle>>>,
+    enter_at_capable: Rc<RefCell<HashSet<ClientHandle>>>,
 ) {
     let mut buf = [0u8; MAX_EVENT_SIZE];
     while conn.recv(&mut buf).await.is_ok() {
         if let Ok(event) = buf.try_into() {
             log::trace!("{addr} <==<==<== {event}");
             match event {
-                ProtoEvent::Pong(b) => {
+                ProtoEvent::Pong(b, enter_at) => {
                     client_manager.set_active_addr(handle, Some(addr));
                     client_manager.set_alive(handle, b);
                     ping_response.borrow_mut().insert(handle);
+                    if enter_at {
+                        enter_at_capable.borrow_mut().insert(handle);
+                    } else {
+                        enter_at_capable.borrow_mut().remove(&handle);
+                    }
                 }
                 event => tx.send((handle, event)).expect("channel closed"),
             }

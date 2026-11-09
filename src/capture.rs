@@ -494,21 +494,22 @@ impl CaptureTask {
 
         let opposite_pos = to_proto_pos(self.get_pos(handle).opposite());
 
-        // EnterAt carries the crossing point; peers running the upstream
-        // protocol ignore it, so every third repeat falls back to the legacy
-        // Enter until the peer acknowledges
-        let enter_event = |resends: u32, frac: Option<f64>| match frac {
-            Some(f) if resends % 3 != 2 => ProtoEvent::EnterAt(opposite_pos, f),
+        // EnterAt carries the crossing point. Upstream peers drop the
+        // connection on an unknown event, so it is only sent to peers that
+        // announced support in their Pong; everyone else gets the legacy Enter.
+        let capable = self.conn.supports_enter_at(handle);
+        let enter_event = |frac: Option<f64>| match frac {
+            Some(f) if capable => ProtoEvent::EnterAt(opposite_pos, f),
             _ => ProtoEvent::Enter(opposite_pos),
         };
         let event = match event {
             CaptureEvent::EdgeFraction(_) => unreachable!("handled above"),
-            CaptureEvent::Begin => enter_event(0, self.enter_fraction),
+            CaptureEvent::Begin => enter_event(self.enter_fraction),
             CaptureEvent::Input(e) => match self.state {
                 // connection not acknowledged, repeat `Enter` event
                 State::WaitingForAck => {
                     self.enter_resends = self.enter_resends.wrapping_add(1);
-                    enter_event(self.enter_resends, self.enter_fraction)
+                    enter_event(self.enter_fraction)
                 }
                 State::Sending => ProtoEvent::Input(e),
             },
