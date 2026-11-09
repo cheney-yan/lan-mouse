@@ -20,13 +20,9 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-/// An `Enter` from a host we are currently controlling that arrives this
-/// soon after we entered it is feedback (our emulated motion re-captured
-/// by its own barrier), not the user coming back.
-const RETURN_FEEDBACK_WINDOW: Duration = Duration::from_millis(300);
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
 
@@ -355,16 +351,8 @@ impl Service {
                 self.emulation_status = Status::Enabled;
                 self.notify_frontend(FrontendEvent::EmulationStatus(self.emulation_status));
             }
-            EmulationEvent::ReleaseNotify => {
-                let feedback = self
-                    .last_client_entered
-                    .is_some_and(|t| t.elapsed() < RETURN_FEEDBACK_WINDOW);
-                if feedback {
-                    log::debug!("ignoring release notify right after entering a client (feedback)");
-                } else {
-                    self.capture.release()
-                }
-            }
+            // someone entered this device: whatever we were doing, give the input back
+            EmulationEvent::ReleaseNotify => self.capture.release(),
             EmulationEvent::Connected { addr, fingerprint } => {
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
             }

@@ -184,12 +184,6 @@ macro_rules! debounce {
 /// the input back to the local machine (stale connection, remote hung, ...)
 const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// a `Leave` arriving this soon after we entered a client is almost always
-/// the remote's own return barrier firing because its cursor was still
-/// parked on that edge from the previous exit; ignore it so entering does
-/// not bounce straight back
-const LEAVE_GRACE: Duration = Duration::from_millis(250);
-
 /// how often we make sure every active client has a live connection, so
 /// the first crossing after start-up (or after a drop) does not have to
 /// wait for a DTLS handshake
@@ -392,10 +386,8 @@ impl CaptureTask {
                         }
                         // client disconnected
                         ProtoEvent::Leave(_) => {
-                            if self.entered_at.is_some_and(|t| t.elapsed() < LEAVE_GRACE) {
-                                log::debug!("ignoring Leave from client {handle} within {LEAVE_GRACE:?} of entering");
-                                continue;
-                            }
+                            // a Leave from the client we are sending to always
+                            // gives the input back: the user must never be stuck
                             log::info!("releasing capture: left remote client device region");
                             self.release_capture(capture).await?;
                         },
