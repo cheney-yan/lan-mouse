@@ -92,6 +92,8 @@ impl Stream for DummyInputCapture {
                 let relative_motion = (offset.0 - self.offset.0, offset.1 - self.offset.1);
                 self.offset = offset;
                 let (dx, dy) = (relative_motion.0 as f64, relative_motion.1 as f64);
+                // LAN_MOUSE_DUMMY_STILL=1: stay put (tests that check pointer placement)
+                let (dx, dy) = if std::env::var_os("LAN_MOUSE_DUMMY_STILL").is_some() { (0.0, 0.0) } else { (dx, dy) };
                 CaptureEvent::Input(input_event::Event::Pointer(PointerEvent::Motion {
                     time: 0,
                     dx,

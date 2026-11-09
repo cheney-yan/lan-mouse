@@ -301,6 +301,9 @@ impl Service {
                     if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
                         self.capture.set_return_point(handle, f);
                     }
+                } else if let Some(f) = fraction {
+                    // someone else is entering this device: place the pointer
+                    self.emulation.enter_at(addr, pos, f);
                 }
                 // check if already registered
                 if !self.incoming_conns.contains(&addr) {

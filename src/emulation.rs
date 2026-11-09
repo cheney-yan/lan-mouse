@@ -59,6 +59,8 @@ pub(crate) enum EmulationEvent {
 enum EmulationRequest {
     Reenable,
     Release(SocketAddr),
+    /// place the pointer where a remote cursor entered
+    EnterAt(SocketAddr, Position, f64),
     ChangePort(u16),
     Terminate,
 }
@@ -88,6 +90,19 @@ impl Emulation {
     pub(crate) fn send_leave_event(&self, addr: SocketAddr) {
         self.request_tx
             .send(EmulationRequest::Release(addr))
+            .expect("channel closed");
+    }
+
+    /// a remote cursor entered through `pos` of this device at `fraction`: place the pointer there
+    pub(crate) fn enter_at(&self, addr: SocketAddr, pos: lan_mouse_ipc::Position, fraction: f64) {
+        let pos = match pos {
+            lan_mouse_ipc::Position::Left => Position::Left,
+            lan_mouse_ipc::Position::Right => Position::Right,
+            lan_mouse_ipc::Position::Top => Position::Top,
+            lan_mouse_ipc::Position::Bottom => Position::Bottom,
+        };
+        self.request_tx
+            .send(EmulationRequest::EnterAt(addr, pos, fraction))
             .expect("channel closed");
     }
 
@@ -149,9 +164,6 @@ impl ListenTask {
                                     self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint, fraction}).expect("channel closed");
                                     self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
                                     self.listener.reply(addr, ProtoEvent::Ack(0)).await;
-                                    if let Some(f) = fraction {
-                                        self.emulation_proxy.enter_at(addr, to_edge(pos), f);
-                                    }
                                 }
                             }
                             ProtoEvent::Leave(_) => {
@@ -182,6 +194,7 @@ impl ListenTask {
                     EmulationRequest::Reenable => self.emulation_proxy.reenable(),
                     // notify the other end that we hit a barrier (should release capture)
                     EmulationRequest::Release(addr) => self.listener.reply(addr, ProtoEvent::Leave(0)).await,
+                    EmulationRequest::EnterAt(addr, pos, f) => self.emulation_proxy.enter_at(addr, to_edge(pos), f),
                     EmulationRequest::ChangePort(port) => {
                         self.listener.request_port_change(port);
                         let result = self.listener.port_changed().await;

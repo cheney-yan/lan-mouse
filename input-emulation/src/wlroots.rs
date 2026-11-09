@@ -12,6 +12,7 @@ use wayland_client::WEnum;
 use wayland_client::backend::WaylandError;
 
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
+use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::{Axis, AxisSource, ButtonState};
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
@@ -25,7 +26,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 };
 
 use wayland_client::{
-    Connection, Dispatch, EventQueue, QueueHandle, delegate_noop,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{wl_registry, wl_seat},
 };
@@ -38,6 +39,9 @@ use super::error::WaylandBindError;
 struct State {
     keymap: Option<(u32, OwnedFd, u32)>,
     input_for_client: HashMap<EmulationHandle, VirtualInput>,
+    /// outputs, in registry order; virtual pointers are bound to the first
+    /// one so that absolute motion is in that output's own coordinates
+    outputs: Vec<WlOutput>,
     seat: wl_seat::WlSeat,
     qh: QueueHandle<Self>,
     vpm: VpManager,
@@ -61,9 +65,19 @@ impl WlrootsEmulation {
             .bind(&qh, 7..=8, ())
             .map_err(|e| WaylandBindError::new(e, "wl_seat 7..=8"))?;
 
+        // version 2 adds create_virtual_pointer_with_output (absolute motion
+        // relative to one output instead of the whole layout)
         let vpm: VpManager = globals
-            .bind(&qh, 1..=1, ())
+            .bind(&qh, 1..=2, ())
             .map_err(|e| WaylandBindError::new(e, "wlr-virtual-pointer-unstable-v1"))?;
+        let outputs: Vec<WlOutput> = globals
+            .contents()
+            .clone_list()
+            .into_iter()
+            .filter(|g| g.interface == "wl_output")
+            .map(|g| globals.registry().bind::<WlOutput, _, _>(g.name, g.version.min(4), &qh, ()))
+            .collect();
+        log::info!("wlroots emulation: {} output(s), virtual pointer manager v{}", outputs.len(), vpm.version());
         let vkm: VkManager = globals
             .bind(&qh, 1..=1, ())
             .map_err(|e| WaylandBindError::new(e, "virtual-keyboard-unstable-v1"))?;
@@ -75,6 +89,7 @@ impl WlrootsEmulation {
             state: State {
                 keymap: None,
                 input_for_client,
+                outputs,
                 seat,
                 vpm,
                 vkm,
@@ -94,7 +109,12 @@ impl WlrootsEmulation {
 
 impl State {
     fn add_client(&mut self, client: EmulationHandle) {
-        let pointer: Vp = self.vpm.create_virtual_pointer(None, &self.qh, ());
+        let pointer: Vp = match self.outputs.first() {
+            Some(output) if self.vpm.version() >= 2 => {
+                self.vpm.create_virtual_pointer_with_output(None, Some(output), &self.qh, ())
+            }
+            _ => self.vpm.create_virtual_pointer(None, &self.qh, ()),
+        };
         let keyboard: Vk = self.vkm.create_virtual_keyboard(&self.seat, &self.qh, ());
 
         // TODO: use server side keymap
@@ -204,9 +224,10 @@ struct VirtualInput {
 
 impl VirtualInput {
     /// warp the pointer to `fraction` along `edge`, slightly inside the screen.
-    /// The virtual pointer was created without an output, so the extents map
-    /// onto the whole output layout; with the usual single output that is the
-    /// screen itself.
+    /// The virtual pointer is bound to an output (protocol v2), so the extents
+    /// map onto that output's own area; on v1 compositors they map onto the
+    /// whole layout instead, which is only right when the layout is a single
+    /// output at the origin.
     fn enter_at(&self, edge: crate::Edge, fraction: f64) {
         const EXTENT: u32 = 65535;
         let now: u32 = SystemTime::now()
@@ -293,6 +314,7 @@ impl VirtualInput {
 }
 
 delegate_noop!(State: Vp);
+delegate_noop!(State: ignore WlOutput);
 delegate_noop!(State: Vk);
 delegate_noop!(State: VpManager);
 delegate_noop!(State: VkManager);
