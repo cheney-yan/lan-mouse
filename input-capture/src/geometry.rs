@@ -37,6 +37,28 @@ impl Rect {
     }
 }
 
+/// how far apart two edges may be and still count as touching (points)
+pub const SNAP_GAP: f64 = 64.0;
+
+/// Whether `display` borders `remote` on the display's `pos` side: the two
+/// facing edges are within `gap` of each other and overlap along the edge.
+/// This is the "snapped together in the layout" relation: crossing is
+/// allowed along the *whole* edge of such a display, regardless of whether
+/// the exact crossing point faces the remote.
+pub fn borders(pos: Position, display: &Rect, remote: &Rect, gap: f64) -> bool {
+    let (facing, overlap) = match pos {
+        Position::Right => ((display.x + display.w - remote.x).abs(), overlap1(display.y, display.h, remote.y, remote.h)),
+        Position::Left => ((remote.x + remote.w - display.x).abs(), overlap1(display.y, display.h, remote.y, remote.h)),
+        Position::Bottom => ((display.y + display.h - remote.y).abs(), overlap1(display.x, display.w, remote.x, remote.w)),
+        Position::Top => ((remote.y + remote.h - display.y).abs(), overlap1(display.x, display.w, remote.x, remote.w)),
+    };
+    facing <= gap && overlap > 0.0
+}
+
+fn overlap1(a0: f64, aw: f64, b0: f64, bw: f64) -> f64 {
+    (a0 + aw).min(b0 + bw) - a0.max(b0)
+}
+
 /// Where along the remote's edge the point `(x, y)` lies, for a remote that
 /// occupies `remote` and sits at `pos` relative to the local displays.
 pub fn edge_fraction(pos: Position, remote: &Rect, x: f64, y: f64) -> f64 {
@@ -130,6 +152,23 @@ mod tests {
         // beyond the Samsung's right end (fraction 1.0 -> x=6016) snaps to the nearest display point
         let (x, y) = return_point(Position::Bottom, &imac(), 1.0, 1.0, &d);
         assert_eq!((x, y), (5989.0, -1.0));
+    }
+
+    #[test]
+    fn snapped_edges() {
+        // the Lenovo touches imac on its right, along its whole height
+        assert!(borders(Position::Right, &lenovo(), &imac(), SNAP_GAP));
+        // the Samsung sits above imac (x 3008..5990 overlap), but not to its left
+        assert!(borders(Position::Bottom, &samsung(), &imac(), SNAP_GAP));
+        assert!(!borders(Position::Right, &samsung(), &imac(), SNAP_GAP));
+        // a shorter remote (logical 2560x1440) still borders the whole Lenovo edge
+        let short = Rect { x: 3008.0, y: 0.0, w: 2560.0, h: 1440.0 };
+        assert!(borders(Position::Right, &lenovo(), &short, SNAP_GAP));
+        // a small gap ("black hole") is tolerated, a large one is not
+        let gapped = Rect { x: 3040.0, y: 0.0, w: 2560.0, h: 1440.0 };
+        assert!(borders(Position::Right, &lenovo(), &gapped, SNAP_GAP));
+        let far = Rect { x: 3500.0, y: 0.0, w: 2560.0, h: 1440.0 };
+        assert!(!borders(Position::Right, &lenovo(), &far, SNAP_GAP));
     }
 
     #[test]

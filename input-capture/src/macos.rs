@@ -1,7 +1,7 @@
 use super::{
     Capture, CaptureError, CaptureEvent, Position,
     error::MacosCaptureCreationError,
-    geometry::{Rect, edge_fraction, return_point},
+    geometry::{Rect, SNAP_GAP, borders, edge_fraction, return_point},
 };
 use async_trait::async_trait;
 use bitflags::bitflags;
@@ -68,10 +68,6 @@ struct Region {
 impl Region {
     fn rect(&self) -> Rect {
         Rect { x: self.x, y: self.y, w: self.w, h: self.h }
-    }
-
-    fn contains(&self, x: f64, y: f64) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 
     fn near(&self, x: f64, y: f64, margin: f64) -> bool {
@@ -213,23 +209,33 @@ impl InputCaptureState {
 
         for &position in self.active_clients.iter() {
             if let Some(region) = self.regions.get(&position) {
-                // region mode: fire when leaving a display into the region,
-                // moving in the direction that matches the position
-                let direction_ok = match position {
-                    Position::Left => relative_x < 0.0 && location.x >= region.x + region.w,
-                    Position::Right => relative_x > 0.0 && location.x < region.x,
-                    Position::Top => relative_y < 0.0 && location.y >= region.y + region.h,
-                    Position::Bottom => relative_y > 0.0 && location.y < region.y,
+                // Region mode: the user crosses when the cursor is pushed out
+                // of a display, through the side facing the remote, from a
+                // display that is snapped to the remote on that side. The
+                // whole edge of such a display counts; where exactly the
+                // cursor crosses only affects the (best-effort) entry point.
+                let leaving = match position {
+                    Position::Left => relative_x < 0.0,
+                    Position::Right => relative_x > 0.0,
+                    Position::Top => relative_y < 0.0,
+                    Position::Bottom => relative_y > 0.0,
                 };
-                let in_region = region.contains(target_x, target_y);
-                let on_display = self.on_any_display(target_x, target_y);
-                if direction_ok && in_region && !on_display {
+                if !leaving || self.on_any_display(target_x, target_y) {
+                    continue;
+                }
+                let remote = region.rect();
+                let from = self
+                    .display_rects()
+                    .into_iter()
+                    .find(|d| d.contains(location.x, location.y));
+                let snapped = from.is_some_and(|d| borders(position, &d, &remote, SNAP_GAP));
+                if snapped {
                     log::debug!("Crossed into region of position: {position:?}");
                     return Some(position);
                 }
-                if in_region || region.near(target_x, target_y, 3.0) {
+                if remote.contains(target_x, target_y) || region.near(target_x, target_y, 3.0) {
                     log::debug!(
-                        "no crossing for {position:?}: loc=({:.1},{:.1}) d=({:.1},{:.1}) target=({:.1},{:.1}) direction_ok={direction_ok} in_region={in_region} on_display={on_display}",
+                        "no crossing for {position:?}: loc=({:.1},{:.1}) d=({:.1},{:.1}) target=({:.1},{:.1}) from_display={from:?} snapped={snapped}",
                         location.x, location.y, relative_x, relative_y, target_x, target_y
                     );
                 }
