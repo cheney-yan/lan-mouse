@@ -144,6 +144,50 @@ def daemon_state():
 
 _size_cache = {}
 
+OPPOSITE = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+
+
+def local_ipv4s(remote_ips=()):
+    """this Mac's IPv4 addresses the remote should dial: the ones sharing a /24 with the remote first,
+    then tailnet (100.64/10). Virtual-switch and bridge addresses are left out."""
+    _, out = run(["ifconfig"])
+    ips = [i for i in re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out) if not i.startswith("127.") and not i.endswith(".0")]
+    nets = {".".join(r.split(".")[:3]) for r in remote_ips}
+    same = [i for i in ips if ".".join(i.split(".")[:3]) in nets]
+    tail = [i for i in ips if re.match(r"100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.", i)]
+    lan = [i for i in ips if i.startswith(("192.168.", "10.")) or re.match(r"172\.(1[6-9]|2\d|3[01])\.", i)]
+    return (same or lan) + tail
+
+
+def remote_apply(hostname, mac_positions, remote_ips=()):
+    """Rewrite the remote's lan-mouse config so it has one active client towards this Mac for every
+    edge that borders it (the opposite of each position on the Mac side), then restart its receiver."""
+    positions = [OPPOSITE[p] for p in mac_positions]
+    _, my_name = run(["scutil", "--get", "LocalHostName"])
+    my_name = my_name.strip() or "mac"
+    script = r"""
+import pathlib, re, sys, json, subprocess, time, base64
+name, ips, positions = json.loads(base64.b64decode(sys.argv[1]))
+p = pathlib.Path.home() / ".config/lan-mouse/config.toml"
+s = p.read_text() if p.exists() else "port = 4242\n"
+p.with_suffix(".toml.bak-" + time.strftime("%Y%m%d-%H%M%S")).write_text(s)
+head = s.split("[[clients]]")[0].rstrip()
+tail = s[s.index("[authorized_fingerprints]"):] if "[authorized_fingerprints]" in s else ""
+blocks = "".join("\n\n[[clients]]\nhostname = %s\nips = [%s]\nposition = \"%s\"\nactivate_on_startup = true\n"
+                 % (json.dumps(name), ", ".join(json.dumps(i) for i in ips), pos) for pos in positions)
+p.write_text(head + blocks + ("\n" + tail if tail else "") + "\n")
+r = subprocess.run(["systemctl", "--user", "restart", "lan-mouse-receiver"], capture_output=True, text=True)
+print("remote config: %s -> %s; restart rc=%d %s" % (name, positions, r.returncode, r.stderr.strip()))
+"""
+    import base64
+    arg = base64.b64encode(json.dumps([my_name, local_ipv4s(remote_ips), positions]).encode()).decode()
+    try:
+        pr = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", hostname, "python3", "-", arg],
+                            input=script, capture_output=True, text=True, timeout=30)
+        return (pr.stdout + pr.stderr).strip() or "remote: no output"
+    except Exception as e:
+        return "remote apply failed: %s" % e
+
 
 def remote_size(hostname):
     """logical size of the remote's primary output, probed over ssh (cached 60 s)"""
@@ -254,7 +298,10 @@ def apply(body):
     pl["EnvironmentVariables"] = env
     write_plist(pl)
     steps.append("plist regions: " + val)
-    # 6. restart daemon
+    # 6. remote side: one client towards us per bordering edge (opposite positions)
+    if body.get("apply_remote", True) and host:
+        steps.append(remote_apply(host, positions, ips))
+    # 7. restart daemon
     uid = os.getuid()
     run(["launchctl", "bootout", "gui/%d/%s" % (uid, LABEL)])
     time.sleep(0.8)

@@ -53,7 +53,8 @@
     <div class="card">
       <button class="primary" id="apply">应用并重启 Lan Mouse</button>
       <button id="reload">重新读取</button>
-      <div class="hint" style="margin-top:8px">应用会：改 Mac 显示器排列（若你拖动了蓝色方块）、写入穿越区域、重写客户端条目、重启 daemon。每次都会自动备份。</div>
+      <label style="justify-content:flex-start;gap:6px;margin-top:8px"><input type="checkbox" id="applyRemote" checked> 同时配置远端（通过 ssh 写入它朝 Mac 的回程边，并重启它的 Lan Mouse）</label>
+      <div class="hint" style="margin-top:6px">应用会：改 Mac 显示器排列（若你拖动了蓝色方块）、写入穿越区域、重写两边的客户端条目、重启 daemon。每次都会自动备份。</div>
       <pre id="result"></pre>
     </div>
     <div class="card">
@@ -172,7 +173,7 @@ document.getElementById('apply').onclick = () => {
   const btn = document.getElementById('apply'); btn.disabled = true;
   const out = document.getElementById('result'); out.textContent = '应用中…';
   fetch('/api/apply', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ remote: S.remote, displays: S.displays.filter(d => !d.main).map(d => ({id:d.id, x:d.x, y:d.y})) }) })
+    body: JSON.stringify({ remote: S.remote, apply_remote: document.getElementById('applyRemote').checked, displays: S.displays.filter(d => !d.main).map(d => ({id:d.id, x:d.x, y:d.y})) }) })
   .then(r => r.json()).then(res => {
     out.textContent = (res.ok ? '✅ 已应用，穿越方向：' + res.positions.join(', ') : '❌ ' + (res.error || '失败')) + '\n' + (res.steps || []).join('\n');
     if (res.state) { showDaemon(res.state.daemon); }
