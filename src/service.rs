@@ -327,6 +327,11 @@ impl Service {
                     None
                 };
                 let fraction = if crate::capture::placement_disabled() { None } else { fraction };
+                if returning_client.is_some() {
+                    crate::hud::edge_event("return_local", pos, fraction);
+                } else {
+                    crate::hud::edge_event("enter_remote", pos, fraction);
+                }
                 match (returning_client, fraction) {
                     (Some(handle), Some(f)) => self.capture.set_return_point(handle, f),
                     // never place OUR cursor for a host we control: that is our own mouse coming back
@@ -426,8 +431,11 @@ impl Service {
                 }
                 self.controlling = None;
             }
-            ICaptureEvent::ClientEntered(handle) => {
+            ICaptureEvent::ClientEntered(handle, fraction) => {
                 log::info!("entering client {handle} ...");
+                if let Some(pos) = self.client_manager.get_pos(handle) {
+                    crate::hud::edge_event("leave_local", pos, fraction);
+                }
                 self.last_client_entered = Some(Instant::now());
                 self.controlling = Some(handle);
                 self.spawn_hook_command(handle);

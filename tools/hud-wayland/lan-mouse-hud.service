@@ -1,0 +1,14 @@
+[Unit]
+Description=Lan Mouse HUD (Wayland overlay)
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/lib/lan-mouse/lan-mouse-hud-wayland.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

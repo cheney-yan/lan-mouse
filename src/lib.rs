@@ -6,6 +6,7 @@ mod connect;
 mod crypto;
 mod dns;
 mod emulation;
+mod hud;
 pub mod emulation_test;
 mod listen;
 pub mod service;

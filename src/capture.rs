@@ -38,7 +38,8 @@ pub(crate) enum ICaptureEvent {
     /// explicitly released in the meantime by
     /// either the remote client leaving its device region,
     /// a new device entering the screen or the release bind.
-    ClientEntered(u64),
+    /// (handle, where along the client's edge we entered, if known)
+    ClientEntered(u64, Option<f64>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,10 +227,7 @@ const LOCATE_BIND: [scancode::Linux; 4] = [
 ];
 
 fn notify_hud(event: &str) {
-    let addr = std::env::var("LAN_MOUSE_HUD_ADDR").unwrap_or_else(|_| "127.0.0.1:4243".to_string());
-    if let Ok(sock) = std::net::UdpSocket::bind("127.0.0.1:0") {
-        let _ = sock.send_to(format!("{{\"event\":\"{event}\"}}").as_bytes(), addr);
-    }
+    crate::hud::simple_event(event);
 }
 
 async fn wait_until(deadline: Option<tokio::time::Instant>) {
@@ -501,7 +499,7 @@ impl CaptureTask {
             self.enter_resends = 0;
             self.active_client.replace(handle);
             self.event_tx
-                .send(ICaptureEvent::ClientEntered(handle))
+                .send(ICaptureEvent::ClientEntered(handle, self.enter_fraction))
                 .expect("channel closed");
         }
 
