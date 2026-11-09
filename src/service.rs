@@ -293,21 +293,18 @@ impl Service {
                 fingerprint,
                 fraction,
             } => {
-                let is_return = self.controls_fingerprint(&fingerprint);
+                // A host we control entering us while we are sending to it is
+                // the cursor coming back. The same host entering us while we
+                // are NOT sending to it is an ordinary entry (two machines can
+                // be each other's clients) and must be treated like any other
+                // peer: never answer it with a Leave, or every crossing from
+                // that side bounces straight back.
+                let is_return = self.controlling.is_some() && self.controls_fingerprint(&fingerprint);
                 if is_return {
-                    // A host we control hit its barrier towards us. That is the
-                    // cursor coming back only while we are actually sending to
-                    // it; otherwise its pointer is just parked on the barrier
-                    // (we ask it to let go below, and leave our cursor alone).
-                    if self.controlling.is_some() {
-                        if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
-                            self.capture.set_return_point(handle, f);
-                        }
-                    } else {
-                        log::debug!("ignoring enter from controlled host {addr}: not controlling it");
+                    if let (Some(f), Some(handle)) = (fraction, self.client_at_named(pos, &fingerprint)) {
+                        self.capture.set_return_point(handle, f);
                     }
                 } else if let Some(f) = fraction {
-                    // someone else is entering this device: place the pointer
                     self.emulation.enter_at(addr, pos, f);
                 }
                 // check if already registered
@@ -321,11 +318,8 @@ impl Service {
                 } else {
                     self.update_incoming(addr, pos, fingerprint);
                 }
-                // A host we control (one of our clients) has hit its own barrier
-                // towards us: that is the cursor coming back, not someone over
-                // there wanting to use this machine. Tell its capture to let go
-                // immediately so its pointer is free again and does not keep
-                // re-sending our own motion back to us.
+                // the cursor came back from a host we were controlling: tell
+                // its capture to let go so its pointer is free again
                 if is_return {
                     self.emulation.send_leave_event(addr);
                 }
