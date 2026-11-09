@@ -196,7 +196,7 @@ func registerHotkey(id: UInt32, keyCode: UInt32, modifiers: UInt32, handler: @es
     var hk = EventHotKeyID(signature: OSType(0x4C4D4844 /* LMHD */), id: id)
     var ref: EventHotKeyRef? = nil
     let st = RegisterEventHotKey(keyCode, modifiers, hk, GetApplicationEventTarget(), 0, &ref)
-    if st != noErr { log("RegisterEventHotKey \(id) failed: \(st)") }
+    if st != noErr { log("RegisterEventHotKey \(id) failed: \(st)") } else { log("hotkey \(id) registered (keyCode \(keyCode))") }
     _ = hk
 }
 func installHotkeyHandler() {
@@ -204,6 +204,7 @@ func installHotkeyHandler() {
     InstallEventHandler(GetApplicationEventTarget(), { (_, event, _) -> OSStatus in
         var hk = EventHotKeyID()
         GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
+        log("hotkey \(hk.id) fired")
         DispatchQueue.main.async { hotkeyHandlers[hk.id]?() }
         return noErr
     }, 1, &spec, nil, nil)
@@ -226,7 +227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.prohibited)
+// .accessory (no Dock icon, no menu bar) rather than .prohibited: Carbon global hotkeys are only
+// delivered to processes the window server treats as applications
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
